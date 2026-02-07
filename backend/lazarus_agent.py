@@ -263,7 +263,8 @@ class LazarusEngine:
         ### CRITICAL CONSTRAINTS:
         1.  **Structure**: logic MUST be inside `./modernized_stack/`.
             -   `modernized_stack/backend/main.py` (FastAPI)
-            -   `modernized_stack/frontend/app/page.tsx` (Next.js)
+            -   `modernized_stack/frontend/app/page.tsx` (Next.js - PUBLIC LANDING)
+            -   `modernized_stack/frontend/app/dashboard/page.tsx` (Next.js - PROTECTED)
             -   `modernized_stack/preview.html` (Static Mock)
             -   `modernized_stack/docker-compose.yml`
         2.  **Execution Requirements**: 
@@ -286,7 +287,12 @@ class LazarusEngine:
                 -   `python-jose[cryptography]`
                 -   `passlib[bcrypt]`
                 -   `bcrypt==4.0.1` (REQUIRED for passlib compatibility)
-        3.  **Preview**: 
+        3.  **Frontend (Next.js)**:
+            -   **CRITICAL UX**: `app/page.tsx` MUST be the **High-Fidelity Cyberpunk Landing/Login Page**. 
+            -   DO NOT generate a "Migration in Progress" placeholder or directory listing.
+            -   The user wants to see the "Result", not "Status".
+            -   Include a "Login" form directly on the landing page that POSTs to `NEXT_PUBLIC_API_URL + '/api/login'`.
+        4.  **Preview**: 
             -   Generate `modernized_stack/preview.html`.
             -   **CRITICAL**: INTERACTIVE MOCK.
             -   Use JS to simulate backend calls if backend is offline.
