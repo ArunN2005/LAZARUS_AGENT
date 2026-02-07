@@ -537,14 +537,14 @@ class LazarusEngine:
             - ❌ WRONG: `items: List[Item]`
             - ✅ CORRECT: `items: Item[]`
             - ❌ WRONG: `data: Dict`
-            - ✅ CORRECT: `data: Record<string, any>` or `data: { [key: string]: any }`
+            - ✅ CORRECT: `data: Record<string, any>` or `data: {{ [key: string]: any }}`
             
             **TypeScript Type Reference**:
             - Strings: `string`
             - Numbers: `number`
             - Booleans: `boolean`
             - Arrays: `Type[]` or `Array<Type>`
-            - Objects: `{ key: Type }` or `interface Name { key: Type }`
+            - Objects: `{{ key: Type }}` or `interface Name {{ key: Type }}`
             - Any: `any` (use sparingly)
             - Null/Undefined: `null | undefined` or `Type | null`
         
