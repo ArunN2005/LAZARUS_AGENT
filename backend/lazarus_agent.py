@@ -720,6 +720,10 @@ class LazarusEngine:
                     install_str = " ".join([f"'{p}'" for p in final_reqs]) # Quote to handle brackets
                     print(f"[*] Pre-loading inferred dependencies to prevent runtime errors...")
                     self.sandbox.commands.run(f"pip install {install_str}", timeout=300)
+                
+                # 4. CRITICAL: Force bcrypt==4.0.1 to prevent version compatibility errors
+                print(f"[*] Enforcing bcrypt==4.0.1 (compatibility fix)...")
+                self.sandbox.commands.run("pip install --force-reinstall bcrypt==4.0.1", timeout=60)
 
                 # START SERVER IN BACKGROUND (With Logging)
                 print(f"[*] Starting Backend {entrypoint} in background (logging to app.log)...")
