@@ -283,7 +283,7 @@ class LazarusEngine:
                 -   Use `text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-purple-600` for headings.
                 -   Use `lucide-react` icons for all actions.
                 -   The Login Page must look like a "Neural Interface Access Terminal".
-            -   **Config**: Generate `tailwind.config.ts` with `content: ["./app/**/*.{ts,tsx}"]`.
+            -   **Config**: Generate `tailwind.config.ts` with `content: ["./app/**/*.{{ts,tsx}}"]`.
         4.  **Preview**: 
             -   Generate `modernized_stack/preview.html` at `/fallback_preview`.
             -   Interactive Mock as backup.
