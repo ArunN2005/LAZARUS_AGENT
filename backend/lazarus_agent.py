@@ -353,7 +353,7 @@ class LazarusEngine:
             │   │   └── globals.css
             │   ├── tailwind.config.ts
             │   ├── postcss.config.mjs
-            │   ├── next.config.ts
+            │   ├── next.config.mjs  (IMPORTANT: Use .mjs NOT .ts)
             │   └── package.json
             └── docker-compose.yml
             ```
@@ -401,10 +401,10 @@ class LazarusEngine:
 
         3.  **Frontend (Next.js) - CRITICAL REQUIREMENTS**:
             
-            **A. `next.config.ts`** - MUST include:
-            ```typescript
-            import type {{ NextConfig }} from 'next';
-            const config: NextConfig = {{
+            **A. `next.config.mjs`** - MUST include (NOTE: Use .mjs, NOT .ts):
+            ```javascript
+            /** @type {{import('next').NextConfig}} */
+            const config = {{
               output: 'standalone',
               reactStrictMode: true,
             }};
