@@ -23,7 +23,9 @@ class LazarusEngine:
         self.api_key = GEMINI_API_KEY
         self.github_token = os.getenv("GITHUB_TOKEN")
         # Fallback to 2.0 Flash if 3.0 Pro is unstable/unavailable
-        self.model_name = "gemini-2.0-flash" 
+        # Gemini 3 Architecture
+        self.planner_model = "gemini-3-flash-preview"
+        self.coder_model = "gemini-3-pro-preview" 
         self.base_url = "https://generativelanguage.googleapis.com/v1beta/models"
 
     def commit_to_github(self, repo_url: str, filename: str, content: str) -> dict:
@@ -107,12 +109,13 @@ class LazarusEngine:
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
-    def _call_gemini(self, prompt: str) -> str:
+    def _call_gemini(self, prompt: str, model: str = None) -> str:
         """Raw HTTP call to Gemini API to bypass SDK installation issues."""
         if not self.api_key:
             raise ValueError("GEMINI_API_KEY is missing.")
-
-        url = f"{self.base_url}/{self.model_name}:generateContent?key={self.api_key}"
+        
+        target_model = model or self.planner_model # Default to fast model
+        url = f"{self.base_url}/{target_model}:generateContent?key={self.api_key}"
         headers = {'Content-Type': 'application/json'}
         data = {
             "contents": [{"parts": [{"text": prompt}]}]
@@ -190,7 +193,7 @@ class LazarusEngine:
         OUTPUT:
         Provide a concise, high-level architectural plan following these phases.
         """
-        return self._call_gemini(prompt)
+        return self._call_gemini(prompt, model=self.planner_model)
 
     def generate_code(self, plan: str) -> dict:
         """
@@ -245,7 +248,7 @@ class LazarusEngine:
         
         RETURN ONLY JSON.
         """
-        response = self._call_gemini(prompt)
+        response = self._call_gemini(prompt, model=self.coder_model)
         # Clean potential markdown around json
         cleaned = response.replace('```json', '').replace('```', '')
         try:

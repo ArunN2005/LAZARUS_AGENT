@@ -2,7 +2,7 @@
 # 🦾 LAZARUS // Autonomous Resurrection Engine
 
 ![Lazarus Concept](https://img.shields.io/badge/STATUS-OPERATIONAL-39ff14?style=for-the-badge&logo=cpu)
-![Stack](https://img.shields.io/badge/Stack-FastAPI%20%7C%20Next.js%2015%20%7C%20Gemini%202.0-black?style=for-the-badge)
+![Stack](https://img.shields.io/badge/Stack-FastAPI%20%7C%20Next.js%2015%20%7C%20Gemini%203-black?style=for-the-badge)
 
 > **"From Legacy to Cyberpunk in One Click."**
 
@@ -12,7 +12,7 @@
 
 ## ✨ Features
 
-- **🤖 Autonomous AI Agent**: Powered by **Google Gemini 2.0 Flash**, it analyzes your legacy code and hallucinates a modern architecture.
+- **🤖 Autonomous AI Agent**: Powered by **Google Gemini 3 Preview**, it analyzes your legacy code and hallucinates a modern architecture.
 - **🔒 E2B Sandboxed Execution**: All generated code is tested in a secure, cloud-based Linux sandbox (E2B) before it ever touches your repo.
 - **🎨 Cyberpunk / Corporate UI**:
     - **"HAXOR" Mode**: Deep Void Black (`#0a0a0a`) & Neon Green (`#39ff14`) aesthetic.
@@ -29,7 +29,9 @@
 **The Brain (Backend):**
 - **Language**: Python 3.10+
 - **Core**: `http.server` (Zero-dependency core) + `requests`
-- **AI**: Google Gemini API
+- **AI Architecture**: 
+    - **Planning**: `gemini-3-flash-preview` (High-speed reasoning)
+    - **Coding**: `gemini-3-pro-preview` (Complex data synthesis)
 - **Runtime**: E2B Code Interpreter (Sandboxing)
 
 **The Face (Frontend):**
