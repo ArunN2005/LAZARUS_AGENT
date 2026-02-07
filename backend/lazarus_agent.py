@@ -277,7 +277,14 @@ class LazarusEngine:
                     with open("modernized_stack/preview.html", "r") as f:
                         return HTMLResponse(content=f.read())
                 ```
-            -   Include `requirements.txt` with ALL dependencies (e.g., fastapi, uvicorn, python-multipart, python-jose[cryptography], passlib[bcrypt]).
+            -   Include `requirements.txt` with ALL dependencies.
+            -   **CRITICAL**: Use these EXACT versions to prevent crashes:
+                -   `fastapi`
+                -   `uvicorn`
+                -   `python-multipart`
+                -   `python-jose[cryptography]`
+                -   `passlib[bcrypt]`
+                -   `bcrypt==4.0.1` (REQUIRED for passlib compatibility)
         3.  **Preview**: 
             -   Generate `modernized_stack/preview.html`.
             -   **CRITICAL**: INTERACTIVE MOCK.
@@ -358,14 +365,13 @@ class LazarusEngine:
                     # Install from requirements.txt
                     self.sandbox.commands.run(f"pip install -r {req_file['filename']}", timeout=300)
                     
-                    # SAFETY NET: Ensure valid runner dependencies are present even if Gemini missed them
-                    print("[*] Verifying core runner dependencies...")
-                    self.sandbox.commands.run("pip install fastapi uvicorn python-multipart", timeout=120)
+                    # SAFETY NET & COMPATIBILITY PATCH
+                    print("[*] Applying Compatibility Patch (bcrypt==4.0.1 for passlib)...")
+                    self.sandbox.commands.run("pip install fastapi uvicorn python-multipart \"bcrypt==4.0.1\"", timeout=120)
                 else:
-                    print("[*] No requirements.txt found. Using Standard Hackathon Stack...")
-                    # Fallback to "Kitchen Sink" list including Auth/DB libs
-                    # Added: python-jose (JWT), passlib (Hashing), bcrypt
-                    self.sandbox.commands.run("pip install fastapi uvicorn flask flask-cors sqlalchemy pydantic python-multipart python-jose[cryptography] passlib[bcrypt] bcrypt", timeout=300)
+                    print("[*] No requirements.txt found. Installing Validated Stack...")
+                    # Fallback to "Kitchen Sink" with PINNED versions
+                    self.sandbox.commands.run("pip install fastapi uvicorn flask flask-cors sqlalchemy pydantic python-multipart python-jose[cryptography] \"passlib[bcrypt]\" \"bcrypt==4.0.1\"", timeout=300)
                 
                 # START SERVER IN BACKGROUND (With Logging)
                 print(f"[*] Starting Backend {entrypoint} in background (logging to app.log)...")
