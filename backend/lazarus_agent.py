@@ -272,12 +272,12 @@ class LazarusEngine:
             -   **CRITICAL**: `uvicorn.run(app, host="0.0.0.0", port=8000)`. DO NOT USE `127.0.0.1` or `localhost`.
             -   **CRITICAL**: DO NOT use relative imports (e.g. `from .database import`) in `main.py`. Use absolute/local imports (e.g. `from database import`).
             -   **CRITICAL**: The backend MUST serve `modernized_stack/preview.html` at `/fallback_preview` (NOT root).
-            -   **CRITICAL**: The ROOT path `GET /` MUST return a JSON Health Check: `{"status": "online", "service": "lazarus-backend"}`.
+            -   **CRITICAL**: The ROOT path `GET /` MUST return a JSON Health Check: `{{ "status": "online", "service": "lazarus-backend" }}`.
             -   Implementation:
                 ```python
                 @app.get("/")
                 def read_root():
-                    return {"status": "online", "service": "lazarus-backend"}
+                    return {{ "status": "online", "service": "lazarus-backend" }}
 
                 @app.get("/fallback_preview")
                 def read_preview():
