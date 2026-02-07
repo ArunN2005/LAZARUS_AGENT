@@ -267,7 +267,9 @@ class LazarusEngine:
             -   `modernized_stack/docker-compose.yml`
         2.  **Execution Requirements**: 
             -   The `backend/main.py` MUST be production-ready.
+            -   The `backend/main.py` MUST be production-ready.
             -   **CRITICAL**: `uvicorn.run(app, host="0.0.0.0", port=8000)`. DO NOT USE `127.0.0.1` or `localhost`.
+            -   **CRITICAL**: DO NOT use relative imports (e.g. `from .database import`) in `main.py`. Use absolute/local imports (e.g. `from database import`).
             -   **CRITICAL**: The backend MUST serve `modernized_stack/preview.html` at the ROOT output `GET /`.
             -   Implementation:
                 ```python
@@ -363,38 +365,66 @@ class LazarusEngine:
                     self.sandbox.commands.run("pip install fastapi uvicorn flask flask-cors sqlalchemy pydantic python-multipart python-jose[cryptography] passlib[bcrypt] bcrypt", timeout=300)
                 
                 # START SERVER IN BACKGROUND (With Logging)
-                print(f"[*] Starting {entrypoint} in background (logging to app.log)...")
-                # CRITICAL: background=True so we don't block
-                # Redirect output to file so we can debug crashes
+                print(f"[*] Starting Backend {entrypoint} in background (logging to app.log)...")
                 self.sandbox.commands.run(f"python {entrypoint} > app.log 2>&1", background=True)
                 
-                # HEALTH CHECK LOOP
-                print("[*] Waiting for server to boot...")
-                success = False
-                for i in range(10): # Try for 30 seconds (10 * 3s)
+                # HEALTH CHECK LOOP (Backend)
+                print("[*] Waiting for Backend to boot...")
+                backend_success = False
+                for i in range(15): # Try for 45 seconds
                     time.sleep(3)
                     try:
-                        # Check if port 8000 is listening
                         check = self.sandbox.commands.run("curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000")
-                        if check.stdout.strip() in ['200', '404', '401', '405', '500']: # Any HTTP response means it's alive
-                            print("[*] Health Check: SUCCESS")
-                            success = True
+                        if check.stdout.strip() in ['200', '404', '401', '405', '500']: 
+                            print("[*] Backend Health Check: SUCCESS")
+                            backend_success = True
                             break
                     except:
                         pass
-                    print(f"[*] Health Check: Attempt {i+1}/10 failed. Retrying...")
+                    print(f"[*] Backend Health Check: Attempt {i+1}/15 failed...")
 
-                if success:
-                    host = self.sandbox.get_host(8000)
-                    output_log = f"Server started at: https://{host}"
-                    return f"{output_log}\n[PREVIEW_URL] https://{host}"
-                else:
-                    # FAILED: Retrieve logs
-                    print("[!] Health Check FAILED. Retrieving error logs...")
+                if not backend_success:
+                    print("[!] Backend FAILED. Retrieving logs...")
                     log_content = self.sandbox.files.read("app.log")
-                    return f"FATAL: Server failed to start.\n\n=== APP.LOG ===\n{log_content}\n==============="
+                    return f"FATAL: Backend failed to start.\n\n=== APP.LOG ===\n{log_content}\n==============="
+
+                # Get Backend URL
+                backend_host = self.sandbox.get_host(8000)
+                backend_url = f"https://{backend_host}"
+                print(f"[*] Backend Live at: {backend_url}")
+
+                # --- PHASE 2: FRONTEND LAUNCH (Dual Stack) ---
+                # Check if we have a frontend package.json
+                has_frontend = any("frontend/package.json" in f['filename'] for f in files)
                 
+                if has_frontend:
+                    print("🚀 Detected Frontend. Initiating Dual-Stack Launch...")
+                    print("[*] Installing Node dependencies (Timeout: 300s)...")
+                    # We need to install inside the frontend directory
+                    # Assuming standard structure: modernized_stack/frontend
+                    frontend_dir = "modernized_stack/frontend"
+                    
+                    # Install deps
+                    self.sandbox.commands.run(f"cd {frontend_dir} && npm install", timeout=300)
+                    
+                    print(f"[*] Starting Frontend in background (connected to {backend_url})...")
+                    # Start Next.js with Backend URL injected
+                    start_cmd = f"cd {frontend_dir} && NEXT_PUBLIC_API_URL={backend_url} npm run dev -- -p 3000"
+                    self.sandbox.commands.run(f"{start_cmd} > frontend.log 2>&1", background=True)
+                    
+                    # Wait for Frontend
+                    time.sleep(10) # Give Next.js a moment to spin up
+                    frontend_host = self.sandbox.get_host(3000)
+                    frontend_url = f"https://{frontend_host}"
+                    
+                    return f"Dual-Stack Deployed Successfully.\n[PREVIEW_URL] {frontend_url}\n[BACKEND_URL] {backend_url}"
+                
+                else:
+                    # Single Stack (Backend Only)
+                    return f"Backend Server started.\n[PREVIEW_URL] {backend_url}"
+
             else: 
+                    # Node entrypoint (Fallback)
                     cmd = f"node {entrypoint} > app.log 2>&1"
                     self.sandbox.commands.run(cmd, background=True)
                     time.sleep(5)
