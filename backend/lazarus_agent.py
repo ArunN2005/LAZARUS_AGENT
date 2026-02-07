@@ -309,11 +309,16 @@ class LazarusEngine:
             logs.append(msg)
             return {"type": "log", "content": msg}
 
+        def emit_debug(msg):
+            return {"type": "debug", "content": msg}
+
         # 1. Plan
         yield emit_log("Initiating Deep Scan of Legacy Repository...")
         
         # Check for error in plan
         plan = self.generate_modernization_plan(repo_url, instructions)
+        yield emit_debug(f"[DEBUG] Generated Plan:\n{plan}")
+
         if "[ERROR]" in plan:
              yield emit_log("Warning: Connection Unstable. Engaged Fallback Protocols.")
              # We continue, but mark fallback
@@ -330,11 +335,14 @@ class LazarusEngine:
         entrypoint = code_data.get('entrypoint', 'modernized_stack/backend/main.py')
         
         encoded_files = [f['filename'] for f in files]
+        yield emit_debug(f"[DEBUG] Generated Files: {', '.join(encoded_files)}")
         yield emit_log(f"Generated {len(encoded_files)} System Modules...")
         
         # 3. Execution
         yield emit_log("Booting Neural Sandbox Environment...")
         sandbox_logs = self.execute_in_sandbox(files, entrypoint)
+        yield emit_debug(f"[DEBUG] Sandbox Output:\n{sandbox_logs}")
+        
         yield emit_log("Verifying System Integrity...")
 
         # Extract HTML for preview

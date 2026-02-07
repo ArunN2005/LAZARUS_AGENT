@@ -17,7 +17,9 @@ type ApiResponse = {
 export default function Home() {
   const [repoUrl, setRepoUrl] = useState('');
   const [instructions, setInstructions] = useState('');
-  const [logs, setLogs] = useState<string>('');
+  const [logs, setLogs] = useState<string[]>([]); // Changed to array for steps
+  const [debugLogs, setDebugLogs] = useState<string>(''); // For raw debug output
+  const [showDebug, setShowDebug] = useState(false); // Toggle
   const [preview, setPreview] = useState<string>('');
   const [isLoading, setIsLoading] = useState(false);
 
@@ -48,7 +50,8 @@ export default function Home() {
 
     setIsLoading(true);
     // Reset states
-    setLogs('[*] ESTABLISHING SECURE CONNECTION TO LAZARUS ENGINE...');
+    setLogs(['[*] ESTABLISHING SECURE CONNECTION TO LAZARUS ENGINE...']);
+    setDebugLogs('');
     setArtifacts([]);
     setSelectedFile(null);
     setPreview('');
@@ -71,18 +74,13 @@ export default function Home() {
         throw new Error(`Connection Severed: ${response.statusText}`);
       }
 
-      // Handle NDJSON stream if possible, or fallback to JSON
-      // NOTE: The previous complex stream reader was lost in my last confusion. 
-      // I am restoring the simple logic for traversing the stream simply or assuming the backend returns JSON 
-      // BUT WAIT, the backend IS streaming NDJSON now. I must restore the stream reader logic!
-
       const reader = response.body?.getReader();
       const decoder = new TextDecoder();
 
       if (!reader) throw new Error("No response stream");
 
       let buffer = '';
-      setLogs(''); // Clear init log
+      setLogs([]); // Clear init log
 
       while (true) {
         const { done, value } = await reader.read();
@@ -97,7 +95,10 @@ export default function Home() {
           try {
             const chunk = JSON.parse(line);
             if (chunk.type === 'log') {
-              setLogs(prev => prev + chunk.content + '\n');
+              setLogs(prev => [...prev, chunk.content]);
+              setDebugLogs(prev => prev + `[LOG] ${chunk.content}\n`);
+            } else if (chunk.type === 'debug') {
+              setDebugLogs(prev => prev + `${chunk.content}\n`);
             } else if (chunk.type === 'result') {
               const res = chunk.data;
               setArtifacts(res.artifacts || []);
@@ -118,7 +119,8 @@ export default function Home() {
       }
 
     } catch (error) {
-      setLogs(prev => prev + `\n[ERROR] PROTOCOL FAILURE: ${error}`);
+      setLogs(prev => [...prev, `[ERROR] PROTOCOL FAILURE: ${error}`]);
+      setDebugLogs(prev => prev + `[ERROR] ${error}\n`);
       setIsLoading(false);
     }
   };
@@ -308,46 +310,72 @@ export default function Home() {
 
           {/* TERMINAL / STEPS */}
           {activeTab === 'terminal' && (
-            <div className={`p-6 space-y-4 h-full overflow-auto ${isDarkMode ? '' : 'text-gray-800'}`}>
+            <div className={`p-6 space-y-4 h-full overflow-auto flex flex-col ${isDarkMode ? '' : 'text-gray-800'}`}>
+
+              {/* Controls */}
+              <div className="flex justify-between items-center mb-4">
+                <h3 className={`text-sm font-bold opacity-50 ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>
+                  {showDebug ? 'NEURAL_DEBUG_STREAM' : 'EXECUTION_PROTOCOL_V2'}
+                </h3>
+                <button
+                  onClick={() => setShowDebug(!showDebug)}
+                  className={`text-xs px-2 py-1 rounded border transition-all
+                        ${showDebug
+                      ? (isDarkMode ? 'bg-[#39ff14] text-black border-[#39ff14]' : 'bg-gray-800 text-white border-gray-800')
+                      : (isDarkMode ? 'text-[#39ff14]/50 border-[#39ff14]/30 hover:text-[#39ff14]' : 'text-gray-400 border-gray-300 hover:text-gray-600')
+                    }
+                    `}
+                >
+                  {showDebug ? 'HIDE_DEBUG_LOGS' : '> SHOW_DEV_LOGS'}
+                </button>
+              </div>
 
               {/* Initial State */}
-              {logs === '' && !isLoading && (
+              {logs.length === 0 && !isLoading && (
                 <div className="flex flex-col items-center justify-center h-full opacity-30 text-center">
                   <Cpu className="w-16 h-16 mb-4 animate-pulse" />
                   <p>AWAITING NEURAL INPUT...</p>
                 </div>
               )}
 
-              {/* Step List */}
-              {logs.split('\n').map((log, i) => {
-                if (!log) return null;
-                // Logic to determine if this step is "done" (icon check) or "loading" (icon spinner)
-                // Since logs stream in sequentially, the LAST log is usually "loading", previous are "done".
-                // Unless the process is finished (isLoading=false).
+              {/* DEBUG VIEW */}
+              {showDebug ? (
+                <div className={`flex-1 font-mono text-xs whitespace-pre-wrap overflow-auto p-4 rounded
+                        ${isDarkMode ? 'bg-black/50 text-[#39ff14]' : 'bg-gray-900 text-green-400'}
+                   `}>
+                  {debugLogs || "Waiting for stream..."}
+                </div>
+              ) : (
+                /* STEP VIEW */
+                <div className="space-y-4">
+                  {logs.map((log, i) => {
+                    if (!log) return null;
+                    const isLast = i === logs.length - 1;
+                    // Use simpler 'last message is active' logic unless not loading
+                    const isActive = isLast && isLoading;
 
-                const isLast = i === logs.trim().split('\n').length - 1;
-                const isDone = !isLast || !isLoading;
-
-                return (
-                  <div key={i} className="flex items-center gap-4 animate-in fade-in slide-in-from-bottom-2 duration-500">
-                    {/* ICON */}
-                    <div className="flex-shrink-0">
-                      {isLast && isLoading ? (
-                        <div className={`w-6 h-6 border-2 border-t-transparent rounded-full animate-spin 
-                                    ${isDarkMode ? 'border-[#39ff14]' : 'border-blue-600'}`}>
+                    return (
+                      <div key={i} className="flex items-center gap-4 animate-in fade-in slide-in-from-bottom-2 duration-500">
+                        {/* ICON */}
+                        <div className="flex-shrink-0">
+                          {isActive ? (
+                            <div className={`w-6 h-6 border-2 border-t-transparent rounded-full animate-spin 
+                                            ${isDarkMode ? 'border-[#39ff14]' : 'border-blue-600'}`}>
+                            </div>
+                          ) : (
+                            <CheckCircle className={`w-6 h-6 ${isDarkMode ? 'text-[#39ff14]' : 'text-green-600'}`} />
+                          )}
                         </div>
-                      ) : (
-                        <CheckCircle className={`w-6 h-6 ${isDarkMode ? 'text-[#39ff14]' : 'text-green-600'}`} />
-                      )}
-                    </div>
 
-                    {/* TEXT */}
-                    <div className={`text-lg tracking-wide ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>
-                      {log}
-                    </div>
-                  </div>
-                );
-              })}
+                        {/* TEXT */}
+                        <div className={`text-lg tracking-wide ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>
+                          {log}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
 
