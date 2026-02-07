@@ -529,6 +529,25 @@ class LazarusEngine:
             - [ ] Code is well-commented and production-ready
             - [ ] No hardcoded values (use env vars)
         
+        5.  **TYPESCRIPT SYNTAX RULES** (CRITICAL - Common Mistakes to Avoid):
+            - ❌ WRONG: `title: str` (Python syntax)
+            - ✅ CORRECT: `title: string` (TypeScript syntax)
+            - ❌ WRONG: `count: int`
+            - ✅ CORRECT: `count: number`
+            - ❌ WRONG: `items: List[Item]`
+            - ✅ CORRECT: `items: Item[]`
+            - ❌ WRONG: `data: Dict`
+            - ✅ CORRECT: `data: Record<string, any>` or `data: { [key: string]: any }`
+            
+            **TypeScript Type Reference**:
+            - Strings: `string`
+            - Numbers: `number`
+            - Booleans: `boolean`
+            - Arrays: `Type[]` or `Array<Type>`
+            - Objects: `{ key: Type }` or `interface Name { key: Type }`
+            - Any: `any` (use sparingly)
+            - Null/Undefined: `null | undefined` or `Type | null`
+        
         RETURN ONLY THE XML STREAM WITH COMPLETE, HIGH-QUALITY FILES.
         """
         # Phase 2: Write Code -> Gemini 3 Pro (Needs Reasoning)
@@ -745,6 +764,14 @@ class LazarusEngine:
                     # Build first to compile Tailwind CSS properly
                     build_result = self.sandbox.commands.run(f"cd {frontend_dir} && npm run build", timeout=300)
                     
+                    # Check for build errors
+                    if build_result.exit_code != 0:
+                        error_output = build_result.stderr + build_result.stdout
+                        print(f"[!] Frontend build failed. Error output:\n{error_output[:500]}")
+                        
+                        # Return error with context for potential retry
+                        return f"FRONTEND BUILD FAILED:\\n\\n{error_output}\\n\\nThis error will trigger automatic code regeneration."
+                    
                     print(f"[*] Starting Frontend in production mode (connected to {backend_url})...")
                     # Start production server with Backend URL injected
                     start_cmd = f"cd {frontend_dir} && NEXT_PUBLIC_API_URL={backend_url} npm start -- -p 3000"
@@ -796,30 +823,56 @@ class LazarusEngine:
 
         if "[ERROR]" in plan:
              yield emit_log("Warning: Connection Unstable. Engaged Fallback Protocols.")
-             # We continue, but mark fallback
              fallback_mode = True
         else:
              fallback_mode = False
              
         yield emit_log("Architecting Resurrection Blueprint...")
 
-        # 2. Code Gen
-        yield emit_log("Synthesizing Modern Cloud Infrastructure...")
-        code_data = self.generate_code(plan)
-        files = code_data.get('files', [])
-        entrypoint = code_data.get('entrypoint', 'modernized_stack/backend/main.py')
+        # 2. Code Gen with Auto-Retry
+        max_retries = 2
+        retry_count = 0
+        sandbox_logs = None
+        files = []
+        entrypoint = 'modernized_stack/backend/main.py'
         
-        encoded_files = [f['filename'] for f in files]
-        yield emit_debug(f"[DEBUG] Generated Files: {', '.join(encoded_files)}")
-        yield emit_log(f"Generated {len(encoded_files)} System Modules...")
+        while retry_count <= max_retries:
+            if retry_count > 0:
+                yield emit_log(f"Auto-Healing: Regenerating code (Attempt {retry_count + 1}/{max_retries + 1})...")
+                # Add error context to plan for retry
+                error_context = f"\n\nPREVIOUS BUILD ERROR:\n{sandbox_logs}\n\nFIX THE ABOVE ERROR. Pay special attention to TypeScript syntax (use 'string' not 'str', 'number' not 'int')."
+                plan_with_error = plan + error_context
+                code_data = self.generate_code(plan_with_error)
+            else:
+                yield emit_log("Synthesizing Modern Cloud Infrastructure...")
+                code_data = self.generate_code(plan)
+            
+            files = code_data.get('files', [])
+            entrypoint = code_data.get('entrypoint', 'modernized_stack/backend/main.py')
+            
+            encoded_files = [f['filename'] for f in files]
+            yield emit_debug(f"[DEBUG] Generated Files: {', '.join(encoded_files)}")
+            yield emit_log(f"Generated {len(encoded_files)} System Modules...")
+            
+            # 3. Execution
+            yield emit_log("Booting Neural Sandbox Environment...")
+            sandbox_logs = self.execute_in_sandbox(files, entrypoint)
+            yield emit_debug(f"[DEBUG] Sandbox Output:\n{sandbox_logs}")
+            
+            # Check if build failed
+            if "FRONTEND BUILD FAILED" in sandbox_logs or "GENERATION FAILED" in sandbox_logs:
+                if retry_count < max_retries:
+                    yield emit_log(f"Build Error Detected. Initiating Auto-Heal...")
+                    retry_count += 1
+                    continue  # Retry
+                else:
+                    yield emit_log("Auto-Heal Failed. Manual intervention required.")
+                    break
+            else:
+                # Success!
+                yield emit_log("Verifying System Integrity...")
+                break
         
-        # 3. Execution
-        yield emit_log("Booting Neural Sandbox Environment...")
-        sandbox_logs = self.execute_in_sandbox(files, entrypoint)
-        yield emit_debug(f"[DEBUG] Sandbox Output:\n{sandbox_logs}")
-        
-        yield emit_log("Verifying System Integrity...")
-
         # Extract HTML for preview
         preview = ""
         # Check logs for URL
@@ -841,7 +894,7 @@ class LazarusEngine:
         
         # Determine Status
         status = "Resurrected"
-        if fallback_mode or "Sandbox Error" in sandbox_logs:
+        if fallback_mode or "Sandbox Error" in sandbox_logs or "BUILD FAILED" in sandbox_logs:
             status = "Fallback"
         
         # Final Result
