@@ -1,21 +1,22 @@
 """
-Lazarus Engine - TRUE PRESERVATION-FIRST Code Generation Prompts
-Version 5.0 - PRESERVE ORIGINAL FILES, ENHANCE IN-PLACE
+Lazarus Engine - ABSOLUTE PRESERVATION Code Generation Prompts
+Version 6.0 - COPY EVERYTHING, ENHANCE APPEARANCE ONLY
 
 This module contains all prompts used by the Lazarus Engine.
-The core philosophy: OUTPUT ALL ORIGINAL FILES WITH ENHANCEMENTS.
+The core philosophy: COPY ALL ORIGINAL CODE, ONLY CHANGE STYLING.
 """
 
 def get_code_generation_prompt(plan: str, deep_scan_result: dict = None) -> str:
     """
-    Returns the TRUE PRESERVATION-FIRST code generation prompt.
-    Key principle: OUTPUT ALL ORIGINAL FILES with UI enhancements.
+    Returns the ABSOLUTE PRESERVATION code generation prompt.
+    Key principle: COPY every line of code, only enhance CSS/styling.
     """
     
     # Build list of ALL files that MUST be output
     file_list = ""
     existing_code_context = ""
     total_files = 0
+    total_endpoints = 0
     
     if deep_scan_result:
         files = deep_scan_result.get("files", [])
@@ -23,51 +24,58 @@ def get_code_generation_prompt(plan: str, deep_scan_result: dict = None) -> str:
         must_preserve = deep_scan_result.get("must_preserve", [])
         api_endpoints = deep_scan_result.get("api_endpoints", [])
         total_files = len(files)
+        total_endpoints = len(api_endpoints)
         
         # Build MANDATORY file list - ALL files must be output!
-        file_list = "YOU MUST OUTPUT ALL OF THESE FILES (ENHANCED):\n"
-        for f in files:
-            file_list += f"  📁 {f['path']}\n"
+        file_list = ""
+        for i, f in enumerate(files, 1):
+            file_list += f"  {i}. {f['path']}\n"
         
-        # Build file contents for reference
+        # Build file contents - COMPLETE, NO TRUNCATION
         for f in files:
             existing_code_context += f"""
-══════════════════════════════════════════════════════════════
-📁 ORIGINAL FILE: {f['path']}
-══════════════════════════════════════════════════════════════
+████████████████████████████████████████████████████████████████████████████████
+█ ORIGINAL FILE #{files.index(f) + 1}: {f['path']}
+█ COPY THIS FILE COMPLETELY, ONLY ENHANCE STYLING
+████████████████████████████████████████████████████████████████████████████████
+
 ```{f['language']}
 {f['content']}
 ```
+
+⚠️ YOU MUST OUTPUT THIS ENTIRE FILE WITH SAME FUNCTIONALITY!
 """
         
+        # Build endpoint list
+        endpoint_list = ""
+        for i, ep in enumerate(api_endpoints, 1):
+            endpoint_list += f"  {i}. {ep}\n"
+        
         preservation_rules = f"""
-═══════════════════════════════════════════════════════════════════════════════
-🔒 PRESERVATION REQUIREMENTS (CRITICAL!)
-═══════════════════════════════════════════════════════════════════════════════
 
-TOTAL FILES IN ORIGINAL REPOSITORY: {total_files}
->>> YOU MUST OUTPUT ALL {total_files} FILES! <<<
+████████████████████████████████████████████████████████████████████████████████
+█ CRITICAL: ABSOLUTE PRESERVATION REQUIREMENTS
+████████████████████████████████████████████████████████████████████████████████
 
+📊 REPOSITORY STATISTICS:
+   - Total Files: {total_files}
+   - Total API Endpoints: {total_endpoints}
+
+⚠️ YOU MUST OUTPUT ALL {total_files} FILES!
+⚠️ YOU MUST PRESERVE ALL {total_endpoints} API ENDPOINTS!
+
+FILES YOU MUST OUTPUT (EVERY SINGLE ONE):
 {file_list}
 
-DETECTED DATABASE: {tech_stack.get('backend', {}).get('database', 'Unknown')}
->> KEEP THE SAME DATABASE TYPE! DO NOT SWITCH TO A DIFFERENT DB! <<
+API ENDPOINTS YOU MUST PRESERVE (EVERY SINGLE ONE):
+{endpoint_list if endpoint_list else "  [Detect from server files and preserve all]"}
 
-DETECTED BACKEND FRAMEWORK: {tech_stack.get('backend', {}).get('framework', 'Unknown')}
->> KEEP THE SAME FRAMEWORK! <<
+DATABASE: {tech_stack.get('backend', {}).get('database', 'Unknown')}
+>> KEEP THE SAME DATABASE! COPY THE EXACT CONNECTION CODE! <<
 
-DETECTED FRONTEND FRAMEWORK: {tech_stack.get('frontend', {}).get('framework', 'Unknown')}
->> ENHANCE IN-PLACE - DO NOT REPLACE WITH A DIFFERENT FRAMEWORK! <<
-
-MUST PRESERVE (COPY FROM ORIGINALS):
-{chr(10).join(['  🔒 ' + item for item in must_preserve[:20]])}
-
-EXISTING API ENDPOINTS (KEEP EXACT SAME PATHS):
-{chr(10).join(['  📍 ' + ep for ep in api_endpoints[:20]])}
-
-═══════════════════════════════════════════════════════════════════════════════
-📚 ALL ORIGINAL FILES (ENHANCE THESE, KEEP SAME PATHS):
-═══════════════════════════════════════════════════════════════════════════════
+████████████████████████████████████████████████████████████████████████████████
+█ ALL ORIGINAL FILES (COPY EACH ONE COMPLETELY):
+████████████████████████████████████████████████████████████████████████████████
 {existing_code_context}
 """
     else:
@@ -77,42 +85,58 @@ EXISTING API ENDPOINTS (KEEP EXACT SAME PATHS):
         total_files = 0
     
     return f"""
-╔══════════════════════════════════════════════════════════════════════════════╗
-║  LAZARUS ENGINE - TRUE PRESERVATION-FIRST CODE GENERATION                   ║
-║  VERSION: 5.0 - PRESERVE ALL ORIGINAL FILES, ENHANCE IN-PLACE              ║
-╚══════════════════════════════════════════════════════════════════════════════╝
+████████████████████████████████████████████████████████████████████████████████
+█  LAZARUS ENGINE - ABSOLUTE PRESERVATION MODE                                █
+█  VERSION: 6.0 - COPY EVERYTHING, ENHANCE APPEARANCE ONLY                   █
+████████████████████████████████████████████████████████████████████████████████
 
-🎯 THE GOLDEN RULE:
+🚨 CRITICAL INSTRUCTION - READ CAREFULLY:
 ═══════════════════════════════════════════════════════════════════════════════
-"IF IT WORKS, DON'T BREAK IT. IF IT'S UGLY, MAKE IT PRETTY. IF IT'S SLOW, MAKE IT FAST."
 
-⚠️ CRITICAL REQUIREMENT:
-═══════════════════════════════════════════════════════════════════════════════
-THE ORIGINAL REPOSITORY HAS {total_files} FILES.
-YOU MUST OUTPUT ALL {total_files} FILES WITH ENHANCEMENTS!
+YOU ARE NOT CREATING A NEW APPLICATION.
+YOU ARE ENHANCING AN EXISTING APPLICATION.
 
-DO NOT create a new structure like "modernized_stack/".
-DO NOT replace original files with Next.js/React if original was HTML.
-DO output EVERY original file with the SAME PATH but ENHANCED content.
+THIS MEANS:
+1. COPY every single file from the original repository
+2. COPY every single function, endpoint, and feature
+3. COPY every single line of business logic
+4. ONLY CHANGE: CSS styling, colors, fonts, visual appearance
 
-WHAT "ENHANCEMENT" MEANS:
-✅ Better CSS styling (modern, glassmorphism, dark mode)
-✅ Better HTML structure (semantic tags, accessibility)
-✅ Better JavaScript (ES6+, cleaner code)
-✅ Same functionality, prettier appearance
-✅ Same database connections, same API endpoints
-✅ Same file paths!
-
-YOU MUST NOT:
-❌ Change database type (MongoDB → SQLite is FORBIDDEN!)
-❌ Change framework (Express → FastAPI is FORBIDDEN for JS projects!)
-❌ Rename or remove any files
-❌ Create new folder structure like "modernized_stack/"
-❌ Replace HTML files with React/Next.js components
-❌ Remove any existing functionality
+THE GOLDEN RULE:
+"COPY EVERYTHING. CHANGE ONLY HOW IT LOOKS, NOT WHAT IT DOES."
 
 ═══════════════════════════════════════════════════════════════════════════════
-SECTION 1: ARCHITECTURAL PLAN
+WHAT "ENHANCEMENT" MEANS (AND DOES NOT MEAN):
+═══════════════════════════════════════════════════════════════════════════════
+
+✅ ENHANCEMENT (DO THIS):
+- Copy the entire original file
+- Keep ALL functions exactly as they are
+- Keep ALL API endpoints exactly as they are
+- Keep ALL database queries exactly as they are
+- ADD modern CSS (better colors, fonts, animations)
+- ADD responsive design
+- IMPROVE code formatting (var → const, callbacks → async/await)
+
+❌ NOT ENHANCEMENT (DO NOT DO THIS):
+- Creating a new file with only some features
+- Summarizing the original code
+- Removing endpoints because "they're not needed"
+- Changing database type
+- Changing the framework
+- Creating fewer files than the original
+
+═══════════════════════════════════════════════════════════════════════════════
+MANDATORY FILE COUNT CHECK:
+═══════════════════════════════════════════════════════════════════════════════
+
+ORIGINAL REPOSITORY HAS: {total_files} FILES
+YOUR OUTPUT MUST HAVE: {total_files} FILES (OR MORE)
+
+IF YOUR OUTPUT HAS FEWER FILES, YOU HAVE FAILED.
+
+═══════════════════════════════════════════════════════════════════════════════
+SECTION 1: MODERNIZATION PLAN
 ═══════════════════════════════════════════════════════════════════════════════
 
 {plan}
@@ -120,92 +144,104 @@ SECTION 1: ARCHITECTURAL PLAN
 {preservation_rules}
 
 ═══════════════════════════════════════════════════════════════════════════════
-SECTION 2: OUTPUT FORMAT (STRICT XML)
+SECTION 2: OUTPUT FORMAT
 ═══════════════════════════════════════════════════════════════════════════════
 
-Output ALL files using the ORIGINAL file paths in this exact XML format:
+Output EVERY file in this exact XML format:
 
-<file path="Home/Home/admin.html">
-... enhanced file content ...
+<file path="[EXACT ORIGINAL PATH]">
+[COMPLETE ENHANCED FILE CONTENT]
 </file>
 
+EXAMPLE - For a file originally at "Home/Home/adminserver.js":
+
 <file path="Home/Home/adminserver.js">
-... enhanced file content ...
+// ENHANCED VERSION - All original functionality preserved
+const express = require('express');
+const mongoose = require('mongoose');
+// ... EVERY SINGLE LINE OF THE ORIGINAL, WITH IMPROVEMENTS ...
 </file>
 
 RULES:
-- Use the EXACT SAME file paths as the original files!
-- Output ALL {total_files} files from the original repository
-- Each file MUST have COMPLETE content (NO placeholders like "// ..." or "TODO")
-- NO markdown code blocks (```) inside the XML
-- One continuous stream of <file> elements
-- Every file must be immediately runnable
+- Use EXACT ORIGINAL file paths
+- Include COMPLETE file content
+- NO placeholders, NO "// ... rest of code ..."
+- NO markdown code blocks inside the XML
+- EVERY function from original must be present
+- EVERY endpoint from original must be present
 
 ═══════════════════════════════════════════════════════════════════════════════
-SECTION 3: HTML FILE ENHANCEMENT RULES
+SECTION 3: SERVER FILE RULES (CRITICAL!)
 ═══════════════════════════════════════════════════════════════════════════════
 
-For HTML files, ENHANCE by:
-1. Add a modern CSS stylesheet link (create a new modern.css if needed)
-2. Improve the existing HTML structure (semantic tags)
-3. Keep ALL existing JavaScript functionality
-4. Keep ALL form fields, buttons, and interactions
-5. Keep ALL API calls and backend connections
-6. Modernize colors, fonts, and layout
+When enhancing server files (server.js, adminserver.js, etc.):
 
-EXAMPLE ENHANCEMENT:
-Original: <div class="container"> → Enhanced: <main class="container glass-panel">
-Original: Old inline styles → Enhanced: Modern CSS classes
-Original: Old fonts → Enhanced: Modern Google Fonts (Inter, Roboto)
+1. COPY EVERY app.get(), app.post(), app.put(), app.delete() from original
+2. COPY EVERY route handler function from original
+3. COPY EVERY database connection/query from original
+4. KEEP the same port numbers
+5. KEEP the same middleware
+6. You may ADD: better error handling, logging, comments
 
-═══════════════════════════════════════════════════════════════════════════════
-SECTION 4: JAVASCRIPT/NODE.JS FILE ENHANCEMENT RULES
-═══════════════════════════════════════════════════════════════════════════════
+WRONG (Missing endpoints):
+```javascript
+app.get('/', (req, res) => res.send('Hello'));
+// Only 1 endpoint when original had 20!
+```
 
-For .js files (server, utilities, etc.):
-1. KEEP the exact same database connection (MongoDB stays MongoDB!)
-2. KEEP the exact same API endpoints
-3. KEEP the exact same route handlers
-4. Can improve code style (var → const/let)
-5. Can add error handling
-6. Can add logging
-7. MUST NOT change core functionality
+CORRECT (All endpoints preserved):
+```javascript
+app.get('/', (req, res) => res.send('Hello'));
+app.get('/users', async (req, res) => {{ /* COPY FROM ORIGINAL */ }});
+app.post('/login', async (req, res) => {{ /* COPY FROM ORIGINAL */ }});
+app.get('/admin', (req, res) => {{ /* COPY FROM ORIGINAL */ }});
+// ... ALL 20 endpoints from original!
+```
 
 ═══════════════════════════════════════════════════════════════════════════════
-SECTION 5: ADD THESE NEW FILES (OPTIONAL ENHANCEMENTS)
+SECTION 4: HTML FILE RULES
 ═══════════════════════════════════════════════════════════════════════════════
 
-You MAY add these new files to enhance the project:
-- modern.css (or enhance existing CSS files)
-- package.json (if not exists, or enhance existing)
+When enhancing HTML files:
 
-But the PRIORITY is outputting ALL original files with enhancements.
-
-═══════════════════════════════════════════════════════════════════════════════
-SECTION 6: FINAL CHECKLIST (Verify Before Output)
-═══════════════════════════════════════════════════════════════════════════════
-
-🔒 PRESERVATION CHECKLIST:
-□ All {total_files} original files are included in output
-□ All files use their ORIGINAL paths (not modernized_stack/)
-□ Database type is SAME as original
-□ All existing API endpoints preserved with exact paths
-□ All existing functionality preserved
-□ No files were renamed or deleted
-
-✅ ENHANCEMENT CHECKLIST:
-□ CSS is modernized (dark mode, glassmorphism, better colors)
-□ HTML is semantic and accessible
-□ JavaScript uses modern syntax (ES6+)
-□ All forms and interactions still work
+1. COPY every single element from the original
+2. KEEP all form fields, buttons, inputs
+3. KEEP all JavaScript in <script> tags
+4. KEEP all event handlers
+5. ENHANCE: Add modern CSS classes, better styling
+6. ENHANCE: Add responsive meta tags
+7. ENHANCE: Link to modern CSS file
 
 ═══════════════════════════════════════════════════════════════════════════════
-NOW GENERATE ALL {total_files} FILES
+SECTION 5: CSS ENHANCEMENT
 ═══════════════════════════════════════════════════════════════════════════════
 
-Output ALL files now in XML format.
-Use ORIGINAL file paths.
-PRESERVE all functionality.
-ENHANCE only the appearance/style.
-Include EVERY file with COMPLETE content.
+CREATE OR ENHANCE a modern CSS file with:
+- CSS variables for theming
+- Dark mode support
+- Modern color palette (not basic red/blue/green)
+- Smooth transitions and animations
+- Glassmorphism effects
+- Modern fonts (Inter, Roboto, etc.)
+- Responsive breakpoints
+
+═══════════════════════════════════════════════════════════════════════════════
+FINAL VERIFICATION BEFORE OUTPUT:
+═══════════════════════════════════════════════════════════════════════════════
+
+Before generating output, verify:
+□ You are outputting ALL {total_files} files
+□ Every server file has ALL original endpoints
+□ Every HTML file has ALL original elements
+□ Every file uses its ORIGINAL path
+□ No functionality has been removed
+□ Only styling/appearance has been changed
+
+═══════════════════════════════════════════════════════════════════════════════
+NOW GENERATE ALL {total_files} ENHANCED FILES
+═══════════════════════════════════════════════════════════════════════════════
+
+Output every single file now.
+Copy all functionality.
+Enhance only appearance.
 """

@@ -511,7 +511,7 @@ This PR contains the **completely modernized** version of your legacy codebase.
             
             print(f"[*] Deep scanning {len(tree)} files in repository...")
             files_fetched = 0
-            max_files = 50  # Limit to avoid API rate limits
+            max_files = 100  # Increased to capture more files from original repo
             
             for item in tree:
                 if item['type'] != 'blob':
