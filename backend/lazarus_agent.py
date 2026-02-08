@@ -115,9 +115,6 @@ class LazarusEngine:
 
     def scan_repository(self, repo_url: str) -> list:
         """ Fetches the file tree of the remote repository using GitHub API. """
-        if not self.github_token:
-             return ["(GITHUB_TOKEN missing - Simulating Scan)"]
-
         try:
             # Parse owner/repo
             match = re.search(r"github\.com/([^/]+)/([^/.]+)", repo_url)
@@ -125,20 +122,35 @@ class LazarusEngine:
                 return ["(Invalid URL - Simulating Scan)"]
             
             owner, repo_name = match.groups()
-            api_url = f"https://api.github.com/repos/{owner}/{repo_name}/git/trees/main?recursive=1"
             
-            headers = {
-                "Authorization": f"token {self.github_token}",
-                "Accept": "application/vnd.github.v3+json"
-            }
+            # Try both 'main' and 'master' branches
+            branches = ['main', 'master']
             
-            resp = requests.get(api_url, headers=headers)
-            if resp.status_code == 200:
-                tree = resp.json().get('tree', [])
-                # Return list of paths
-                return [item['path'] for item in tree if item['type'] == 'blob']
-            else:
-                 return [f"(API Error {resp.status_code} - Simulating Scan)"]
+            headers = {"Accept": "application/vnd.github.v3+json"}
+            if self.github_token:
+                headers["Authorization"] = f"token {self.github_token}"
+            
+            for branch in branches:
+                api_url = f"https://api.github.com/repos/{owner}/{repo_name}/git/trees/{branch}?recursive=1"
+                
+                resp = requests.get(api_url, headers=headers)
+                if resp.status_code == 200:
+                    tree = resp.json().get('tree', [])
+                    # Return list of paths
+                    return [item['path'] for item in tree if item['type'] == 'blob']
+            
+            # If both branches failed, try to get default branch from repo info
+            repo_api_url = f"https://api.github.com/repos/{owner}/{repo_name}"
+            repo_resp = requests.get(repo_api_url, headers=headers)
+            if repo_resp.status_code == 200:
+                default_branch = repo_resp.json().get('default_branch', 'main')
+                api_url = f"https://api.github.com/repos/{owner}/{repo_name}/git/trees/{default_branch}?recursive=1"
+                resp = requests.get(api_url, headers=headers)
+                if resp.status_code == 200:
+                    tree = resp.json().get('tree', [])
+                    return [item['path'] for item in tree if item['type'] == 'blob']
+            
+            return [f"(API Error - Could not find repository or branch)"]
                  
         except Exception as e:
             return [f"(Scan Error: {str(e)})"]
