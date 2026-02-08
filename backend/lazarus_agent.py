@@ -911,12 +911,80 @@ Output format: Plain text architectural plan with clear sections.
             # Fallback for debugging if regex fails
             return {
                 "files": [{"filename": "error.log", "content": response}],
-                "entrypoint": "error.log" 
+                "entrypoint": "error.log",
+                "runtime": "unknown"
             }
+
+        # SMART ENTRYPOINT DETECTION
+        # Detect runtime and entrypoint based on generated files
+        entrypoint = None
+        runtime = "python"  # Default
+        
+        # Priority order for entrypoints
+        node_entrypoints = [
+            "server.js", "index.js", "app.js", "main.js",
+            "adminserver.js", "backend.js"
+        ]
+        python_entrypoints = [
+            "main.py", "app.py", "server.py", "run.py"
+        ]
+        
+        for f in files:
+            filename = f["filename"]
+            basename = os.path.basename(filename)
+            
+            # Check for Node.js entrypoints
+            if basename in node_entrypoints or filename.endswith("server.js"):
+                entrypoint = filename
+                runtime = "node"
+                print(f"[*] Detected Node.js entrypoint: {entrypoint}")
+                break
+            
+            # Check for Python entrypoints
+            if basename in python_entrypoints:
+                entrypoint = filename
+                runtime = "python"
+                print(f"[*] Detected Python entrypoint: {entrypoint}")
+                break
+        
+        # Fallback: Look for package.json (Node.js) or requirements.txt (Python)
+        if not entrypoint:
+            for f in files:
+                if f["filename"].endswith("package.json"):
+                    # Node.js project - find the main server file
+                    runtime = "node"
+                    for ff in files:
+                        if ff["filename"].endswith(".js") and "server" in ff["filename"].lower():
+                            entrypoint = ff["filename"]
+                            break
+                    if not entrypoint:
+                        # Try to find any .js file
+                        for ff in files:
+                            if ff["filename"].endswith(".js"):
+                                entrypoint = ff["filename"]
+                                break
+                    break
+                elif f["filename"].endswith("requirements.txt") or f["filename"].endswith(".py"):
+                    runtime = "python"
+                    # Python project - use default
+                    entrypoint = "modernized_stack/backend/main.py"
+                    break
+        
+        # Final fallback
+        if not entrypoint:
+            if any(f["filename"].endswith(".js") for f in files):
+                runtime = "node"
+                entrypoint = next((f["filename"] for f in files if f["filename"].endswith(".js")), None)
+            else:
+                runtime = "python"
+                entrypoint = "modernized_stack/backend/main.py"
+        
+        print(f"[*] Smart Detection: Runtime={runtime}, Entrypoint={entrypoint}")
 
         return {
             "files": files,
-            "entrypoint": "modernized_stack/backend/main.py"
+            "entrypoint": entrypoint,
+            "runtime": runtime
         }
 
     def infer_dependencies(self, files: list) -> list:
@@ -994,7 +1062,13 @@ Output format: Plain text architectural plan with clear sections.
             
         return list(detected)
 
-    def execute_in_sandbox(self, files: list, entrypoint: str):
+    def execute_in_sandbox(self, files: list, entrypoint: str, runtime: str = "python"):
+        """
+        Execute generated code in E2B sandbox.
+        Supports both Python and Node.js runtimes.
+        
+        runtime: "python" or "node"
+        """
         if not E2B_AVAILABLE or not E2B_API_KEY:
             return "E2B Sandbox not available (Dependencies or Key missing)."
             
@@ -1002,7 +1076,7 @@ Output format: Plain text architectural plan with clear sections.
         if entrypoint == "error.log":
             return f"GENERATION FAILED: Gemini API returned an error.\n\n=== ERROR LOG ===\n{files[0]['content']}\n================="
 
-        print(f"[*] Executing {entrypoint} in E2B Sandbox...")
+        print(f"[*] Executing {entrypoint} in E2B Sandbox (Runtime: {runtime})...")
         
         try:
             # AGGRESSIVE CLEANUP: Kill previous sandbox if exists
@@ -1049,8 +1123,99 @@ Output format: Plain text architectural plan with clear sections.
                 except Exception as write_err:
                     print(f"  [!] File write error for {safe_filename}: {write_err}")
             
-            # Install Dependencies (Hackathon Mode: Smart Install)
-            if entrypoint.endswith('.py'):
+            # Install Dependencies Based on Runtime
+            if runtime == "node" or entrypoint.endswith('.js'):
+                # ═══════════════════════════════════════════════════════════
+                # NODE.JS EXECUTION PATH
+                # ═══════════════════════════════════════════════════════════
+                print("[*] 🟢 Node.js Runtime Detected")
+                
+                # Find the directory containing package.json
+                entrypoint_dir = os.path.dirname(entrypoint)
+                if not entrypoint_dir:
+                    entrypoint_dir = "."
+                
+                # Look for package.json
+                package_json = next((f for f in files if f['filename'].endswith('package.json')), None)
+                if package_json:
+                    package_dir = os.path.dirname(package_json['filename']) or "."
+                    print(f"[*] Found package.json in: {package_dir}")
+                    
+                    # Install Node.js dependencies
+                    print("[*] Installing Node.js dependencies (npm install)...")
+                    install_result = self.sandbox.commands.run(f"cd {package_dir} && npm install", timeout=300)
+                    if install_result.exit_code != 0:
+                        print(f"[!] npm install warning: {install_result.stderr[:200]}")
+                else:
+                    # No package.json, install common packages
+                    print("[*] No package.json found, installing common packages...")
+                    package_dir = entrypoint_dir
+                    self.sandbox.commands.run("npm init -y", timeout=30)
+                    self.sandbox.commands.run("npm install express mongoose cors dotenv", timeout=120)
+                
+                # START NODE SERVER IN BACKGROUND
+                print(f"[*] Starting Node.js Server: {entrypoint} (logging to app.log)...")
+                # Try different ports (Express typically uses 3000, but some apps use 8000)
+                node_cmd = f"cd {package_dir} && node {os.path.basename(entrypoint)} > app.log 2>&1"
+                self.sandbox.commands.run(node_cmd, background=True)
+                
+                # HEALTH CHECK LOOP (for Node.js - check ports 3000 and 8000)
+                print("[*] Waiting for Node.js Backend to boot...")
+                backend_success = False
+                node_port = None
+                
+                for i in range(20):  # Try for 60 seconds
+                    time.sleep(3)
+                    try:
+                        # Check both common ports
+                        for port in [3000, 8000, 5000]:
+                            check_script = f"""
+import urllib.request
+import urllib.error
+try:
+    response = urllib.request.urlopen('http://127.0.0.1:{port}', timeout=2)
+    print('PORT_{port}_OK')
+except urllib.error.HTTPError as e:
+    print('PORT_{port}_OK')  # 4xx/5xx still means server is running
+except:
+    pass
+"""
+                            result = self.sandbox.commands.run(f"python3 -c \"{check_script}\"")
+                            if f"PORT_{port}_OK" in result.stdout:
+                                node_port = port
+                                backend_success = True
+                                break
+                        
+                        if backend_success:
+                            break
+                            
+                        print(f"[*] Node.js Health Check {i+1}/20: Waiting...")
+                        
+                        # Early log check for crash detection
+                        if i == 4:
+                            log_check = self.sandbox.commands.run(f"cd {package_dir} && cat app.log 2>/dev/null | head -10")
+                            if log_check.stdout:
+                                print(f"[DEBUG] Early Log Check:\n{log_check.stdout[:300]}")
+                                
+                    except Exception as e:
+                        print(f"[*] Node.js Health Check {i+1}/20: {str(e)[:50]}...")
+                
+                if not backend_success:
+                    # Get logs for debugging
+                    log_result = self.sandbox.commands.run(f"cd {package_dir} && cat app.log 2>/dev/null")
+                    return f"FATAL: Node.js Backend failed to start after 60 seconds.\n\n=== APP.LOG ===\n{log_result.stdout[:1000]}\n==============="
+                
+                backend_url = f"https://{self.sandbox.get_host(node_port)}"
+                print(f"[*] Node.js Backend Live at: {backend_url}")
+                
+                # For Node.js projects, just return the backend URL since frontend/backend are often integrated
+                return f"Node.js Server started successfully.\n[PREVIEW_URL] {backend_url}"
+                
+            elif runtime == "python" or entrypoint.endswith('.py'):
+                # ═══════════════════════════════════════════════════════════
+                # PYTHON EXECUTION PATH (Original)
+                # ═══════════════════════════════════════════════════════════
+                print("[*] 🐍 Python Runtime Detected")
                 print("[*] Installing Python dependencies (Timeout: 300s)...")
                 
                 # 1. Start with Intelligent Inference
@@ -1065,18 +1230,11 @@ Output format: Plain text architectural plan with clear sections.
                 req_file = next((f for f in files if "requirements.txt" in f['filename']), None)
                 if req_file:
                     print(f"[*] Merging with requirements.txt...")
-                    # We append contents of req file to our set (ignoring versions for now, simple string match)
-                    # Ideally we trust the explicit requirements.txt for specific versions, 
-                    # but we *Must* override critical ones like bcrypt.
-                    
-                    # Install req file first
                     self.sandbox.commands.run(f"pip install -r {req_file['filename']}", timeout=300)
                 
                 # 3. Force Install the Consolidated "Smart" list
-                # This ensures that even if requirements.txt missed 'python-multipart', we catch it from 'Form' usage.
-                # And it enforces our 'bcrypt==4.0.1' override if it was inferred.
                 if final_reqs:
-                    install_str = " ".join([f"'{p}'" for p in final_reqs]) # Quote to handle brackets
+                    install_str = " ".join([f"'{p}'" for p in final_reqs])
                     print(f"[*] Pre-loading inferred dependencies to prevent runtime errors...")
                     self.sandbox.commands.run(f"pip install {install_str}", timeout=300)
                 
@@ -1274,6 +1432,7 @@ except Exception as e:
                 
                 files = code_data.get('files', [])
                 entrypoint = code_data.get('entrypoint', 'modernized_stack/backend/main.py')
+                runtime = code_data.get('runtime', 'python')  # NEW: Get runtime from code_data
                 
                 # Validate generated files
                 if not files:
@@ -1282,10 +1441,11 @@ except Exception as e:
                 encoded_files = [f['filename'] for f in files]
                 yield emit_debug(f"[DEBUG] Generated Files: {', '.join(encoded_files)}")
                 yield emit_log(f"Generated {len(encoded_files)} System Modules...")
+                yield emit_log(f"📦 Detected Runtime: {runtime.upper()} | Entrypoint: {entrypoint}")
                 
-                # 3. Execution
+                # 3. Execution (Pass runtime for Node.js vs Python handling)
                 yield emit_log("Booting Neural Sandbox Environment...")
-                sandbox_logs = self.execute_in_sandbox(files, entrypoint)
+                sandbox_logs = self.execute_in_sandbox(files, entrypoint, runtime)
                 yield emit_debug(f"[DEBUG] Sandbox Output:\n{sandbox_logs}")
                 
                 # 4. Comprehensive Error Detection
