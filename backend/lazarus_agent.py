@@ -1155,8 +1155,21 @@ Output format: Plain text architectural plan with clear sections.
                 
                 # START NODE SERVER IN BACKGROUND
                 print(f"[*] Starting Node.js Server: {entrypoint} (logging to app.log)...")
-                # Try different ports (Express typically uses 3000, but some apps use 8000)
-                node_cmd = f"cd {package_dir} && node {os.path.basename(entrypoint)} > app.log 2>&1"
+                
+                # CRITICAL: Calculate the correct path relative to package.json directory
+                # If package.json is at "modernized_stack" and entrypoint is "modernized_stack/server/app.js"
+                # We need to run: cd modernized_stack && node server/app.js
+                if package_dir and package_dir != ".":
+                    if entrypoint.startswith(package_dir):
+                        # Get the relative path from package_dir
+                        relative_entrypoint = entrypoint[len(package_dir):].lstrip("/\\")
+                    else:
+                        relative_entrypoint = entrypoint
+                else:
+                    relative_entrypoint = entrypoint
+                
+                print(f"[*] Node.js Command: cd {package_dir} && node {relative_entrypoint}")
+                node_cmd = f"cd {package_dir} && node {relative_entrypoint} > app.log 2>&1"
                 self.sandbox.commands.run(node_cmd, background=True)
                 
                 # HEALTH CHECK LOOP (for Node.js - check ports 3000 and 8000)
@@ -1706,13 +1719,33 @@ except Exception as e:
         
         # Error patterns to detect with their types
         error_patterns = [
+            # ═══════════════════════════════════════════════════════════
+            # NODE.JS SPECIFIC ERRORS (CRITICAL FOR AUTO-HEALING)
+            # ═══════════════════════════════════════════════════════════
+            (r"Cannot find module", "NODE_MODULE_NOT_FOUND"),
+            (r"Error: Cannot find module", "NODE_MODULE_NOT_FOUND"),
+            (r"MODULE_NOT_FOUND", "NODE_MODULE_NOT_FOUND"),
+            (r"node:internal/modules", "NODE_INTERNAL_ERROR"),
+            (r"throw err;", "NODE_CRASH"),
+            (r"ReferenceError:", "NODE_REFERENCE_ERROR"),
+            (r"Error: listen EADDRINUSE", "NODE_PORT_IN_USE"),
+            (r"ENOENT: no such file", "NODE_FILE_NOT_FOUND"),
+            (r"SyntaxError: Unexpected", "NODE_SYNTAX_ERROR"),
+            (r"Error: ENOENT", "NODE_FILE_NOT_FOUND"),
+            
+            # Server Failures
+            (r"FATAL: Node\.js Backend failed", "NODE_SERVER_CRASH"),
+            (r"FATAL: Backend failed", "BACKEND_CRASH"),
+            (r"Backend failed to start", "BACKEND_STARTUP_FAILED"),
+            (r"No such file or directory", "FILE_NOT_FOUND"),
+            (r"can't open file", "FILE_NOT_FOUND"),
+            
             # Build Errors
             (r"FRONTEND BUILD FAILED", "FRONTEND_BUILD_ERROR"),
             (r"npm ERR!", "NPM_ERROR"),
             (r"error TS\d+:", "TYPESCRIPT_ERROR"),
             (r"SyntaxError:", "SYNTAX_ERROR"),
             (r"Module not found", "MODULE_NOT_FOUND"),
-            (r"Cannot find module", "MODULE_NOT_FOUND"),
             
             # Sandbox Errors
             (r"Sandbox Error:", "SANDBOX_ERROR"),
@@ -1727,6 +1760,7 @@ except Exception as e:
             (r"IndentationError:", "PYTHON_SYNTAX_ERROR"),
             (r"NameError:", "PYTHON_NAME_ERROR"),
             (r"TypeError:", "PYTHON_TYPE_ERROR"),
+            (r"FileNotFoundError:", "PYTHON_FILE_NOT_FOUND"),
             
             # Connection Errors
             (r"ECONNREFUSED", "CONNECTION_ERROR"),
@@ -1736,6 +1770,11 @@ except Exception as e:
             # Generation Errors
             (r"GENERATION FAILED", "GENERATION_ERROR"),
             (r"No files were generated", "EMPTY_GENERATION"),
+            
+            # MongoDB/Database Errors
+            (r"MongoNetworkError", "DATABASE_CONNECTION_ERROR"),
+            (r"MongoServerError", "DATABASE_ERROR"),
+            (r"ECONNREFUSED.*27017", "MONGODB_CONNECTION_ERROR"),
         ]
         
         for pattern, error_type in error_patterns:
