@@ -1135,41 +1135,55 @@ Output format: Plain text architectural plan with clear sections.
                 if not entrypoint_dir:
                     entrypoint_dir = "."
                 
-                # Look for package.json
+                # Look for package.json - check MULTIPLE locations
                 package_json = next((f for f in files if f['filename'].endswith('package.json')), None)
+                
+                # Check for package.json in entrypoint directory specifically
+                entrypoint_package = next((f for f in files if f['filename'] == f"{entrypoint_dir}/package.json"), None)
+                
                 if package_json:
                     package_dir = os.path.dirname(package_json['filename']) or "."
                     print(f"[*] Found package.json in: {package_dir}")
                     
-                    # Install Node.js dependencies
+                    # Install Node.js dependencies in package.json directory
                     print("[*] Installing Node.js dependencies (npm install)...")
                     install_result = self.sandbox.commands.run(f"cd {package_dir} && npm install", timeout=300)
                     if install_result.exit_code != 0:
-                        print(f"[!] npm install warning: {install_result.stderr[:200]}")
+                        print(f"[!] npm install warning: {install_result.stderr[:200] if install_result.stderr else 'No stderr'}")
+                    
+                    # CRITICAL: If entrypoint is in a subdirectory, also install there
+                    # This handles cases like: package.json in root, server in server/
+                    if entrypoint_dir and entrypoint_dir != "." and entrypoint_dir != package_dir:
+                        # Check if there's a package.json in the server directory
+                        if entrypoint_package:
+                            print(f"[*] Found separate package.json in server directory: {entrypoint_dir}")
+                            print(f"[*] Installing dependencies in {entrypoint_dir}...")
+                            self.sandbox.commands.run(f"cd {entrypoint_dir} && npm install", timeout=300)
+                        else:
+                            # No package.json in server dir - install common packages there
+                            print(f"[*] No package.json in {entrypoint_dir}, installing common packages...")
+                            self.sandbox.commands.run(f"cd {entrypoint_dir} && npm init -y && npm install express mongoose cors dotenv bcrypt multer", timeout=180)
                 else:
-                    # No package.json, install common packages
+                    # No package.json anywhere, install common packages in entrypoint directory
                     print("[*] No package.json found, installing common packages...")
                     package_dir = entrypoint_dir
-                    self.sandbox.commands.run("npm init -y", timeout=30)
-                    self.sandbox.commands.run("npm install express mongoose cors dotenv", timeout=120)
+                    self.sandbox.commands.run(f"cd {entrypoint_dir} && npm init -y", timeout=30)
+                    self.sandbox.commands.run(f"cd {entrypoint_dir} && npm install express mongoose cors dotenv bcrypt multer", timeout=180)
                 
                 # START NODE SERVER IN BACKGROUND
                 print(f"[*] Starting Node.js Server: {entrypoint} (logging to app.log)...")
                 
-                # CRITICAL: Calculate the correct path relative to package.json directory
-                # If package.json is at "modernized_stack" and entrypoint is "modernized_stack/server/app.js"
-                # We need to run: cd modernized_stack && node server/app.js
-                if package_dir and package_dir != ".":
-                    if entrypoint.startswith(package_dir):
-                        # Get the relative path from package_dir
-                        relative_entrypoint = entrypoint[len(package_dir):].lstrip("/\\")
-                    else:
-                        relative_entrypoint = entrypoint
-                else:
-                    relative_entrypoint = entrypoint
+                # Run from entrypoint directory (where we installed dependencies)
+                # Just run the entrypoint file directly
+                server_basename = os.path.basename(entrypoint)
                 
-                print(f"[*] Node.js Command: cd {package_dir} && node {relative_entrypoint}")
-                node_cmd = f"cd {package_dir} && node {relative_entrypoint} > app.log 2>&1"
+                if entrypoint_dir and entrypoint_dir != ".":
+                    print(f"[*] Node.js Command: cd {entrypoint_dir} && node {server_basename}")
+                    node_cmd = f"cd {entrypoint_dir} && node {server_basename} > app.log 2>&1"
+                else:
+                    print(f"[*] Node.js Command: node {entrypoint}")
+                    node_cmd = f"node {entrypoint} > app.log 2>&1"
+                
                 self.sandbox.commands.run(node_cmd, background=True)
                 
                 # HEALTH CHECK LOOP (for Node.js - check ports 3000 and 8000)
