@@ -438,6 +438,240 @@ This PR contains the **completely modernized** version of your legacy codebase.
         except Exception as e:
             return [f"(Scan Error: {str(e)})"]
 
+    def scan_repository_deep(self, repo_url: str) -> dict:
+        """
+        DEEP SCAN: Fetches ALL file CONTENTS, not just paths.
+        This is the foundation of preservation-first architecture.
+        
+        Returns: {
+            "files": [{"path": str, "content": str, "language": str}],
+            "tech_stack": {...},
+            "database": {...},
+            "must_preserve": [...],
+            "can_modernize": [...]
+        }
+        """
+        import base64
+        
+        result = {
+            "files": [],
+            "tech_stack": {
+                "backend": {"framework": None, "database": None, "auth": None},
+                "frontend": {"framework": None, "styling": None},
+            },
+            "must_preserve": [],
+            "can_modernize": [],
+            "env_vars": [],
+            "api_endpoints": [],
+            "database_schemas": []
+        }
+        
+        try:
+            # Parse owner/repo
+            match = re.search(r"github\.com/([^/]+)/([^/.]+)", repo_url)
+            if not match:
+                return result
+            
+            owner, repo_name = match.groups()
+            
+            headers = {"Accept": "application/vnd.github.v3+json"}
+            if self.github_token:
+                headers["Authorization"] = f"token {self.github_token}"
+            
+            # Get default branch
+            repo_resp = requests.get(f"https://api.github.com/repos/{owner}/{repo_name}", headers=headers)
+            default_branch = "main"
+            if repo_resp.status_code == 200:
+                default_branch = repo_resp.json().get('default_branch', 'main')
+            
+            # Get file tree
+            tree_url = f"https://api.github.com/repos/{owner}/{repo_name}/git/trees/{default_branch}?recursive=1"
+            tree_resp = requests.get(tree_url, headers=headers)
+            
+            if tree_resp.status_code != 200:
+                print(f"[!] Failed to get repository tree: {tree_resp.status_code}")
+                return result
+            
+            tree = tree_resp.json().get('tree', [])
+            
+            # File extensions to fetch content for
+            code_extensions = {
+                '.py', '.js', '.ts', '.tsx', '.jsx', '.json', '.yaml', '.yml',
+                '.html', '.css', '.scss', '.md', '.txt', '.env', '.env.example',
+                '.toml', '.cfg', '.ini', '.sql', '.prisma', '.graphql'
+            }
+            
+            # Files to always fetch
+            important_files = {
+                'package.json', 'requirements.txt', 'Pipfile', 'pyproject.toml',
+                'docker-compose.yml', 'docker-compose.yaml', 'Dockerfile',
+                '.env', '.env.example', '.env.local', 'config.py', 'settings.py',
+                'schema.prisma', 'models.py', 'schemas.py', 'database.py'
+            }
+            
+            print(f"[*] Deep scanning {len(tree)} files in repository...")
+            files_fetched = 0
+            max_files = 50  # Limit to avoid API rate limits
+            
+            for item in tree:
+                if item['type'] != 'blob':
+                    continue
+                    
+                path = item['path']
+                _, ext = os.path.splitext(path)
+                filename = os.path.basename(path)
+                
+                # Check if we should fetch this file
+                should_fetch = (
+                    ext.lower() in code_extensions or
+                    filename in important_files or
+                    'model' in path.lower() or
+                    'schema' in path.lower() or
+                    'route' in path.lower() or
+                    'api' in path.lower() or
+                    'controller' in path.lower()
+                )
+                
+                # Skip node_modules, venv, etc.
+                skip_dirs = ['node_modules', 'venv', '.venv', '__pycache__', '.git', 'dist', 'build']
+                if any(skip_dir in path for skip_dir in skip_dirs):
+                    should_fetch = False
+                
+                if should_fetch and files_fetched < max_files:
+                    try:
+                        # Fetch file content
+                        content_url = f"https://api.github.com/repos/{owner}/{repo_name}/contents/{path}?ref={default_branch}"
+                        content_resp = requests.get(content_url, headers=headers)
+                        
+                        if content_resp.status_code == 200:
+                            content_data = content_resp.json()
+                            if content_data.get('encoding') == 'base64':
+                                content = base64.b64decode(content_data['content']).decode('utf-8', errors='ignore')
+                                
+                                # Detect language
+                                lang = self._detect_language(path, content)
+                                
+                                result["files"].append({
+                                    "path": path,
+                                    "content": content,
+                                    "language": lang
+                                })
+                                
+                                # Analyze this file for tech stack
+                                self._analyze_file_for_tech_stack(path, content, result)
+                                
+                                files_fetched += 1
+                                print(f"  [+] Fetched: {path}")
+                    except Exception as e:
+                        print(f"  [!] Error fetching {path}: {e}")
+            
+            print(f"[*] Deep scan complete: {files_fetched} files analyzed")
+            
+            # Summarize what must be preserved vs modernized
+            self._categorize_preservation_targets(result)
+            
+            return result
+            
+        except Exception as e:
+            print(f"[!] Deep scan error: {str(e)}")
+            return result
+    
+    def _detect_language(self, path: str, content: str) -> str:
+        """Detect programming language from file path and content."""
+        ext_map = {
+            '.py': 'python', '.js': 'javascript', '.ts': 'typescript',
+            '.tsx': 'typescript-react', '.jsx': 'javascript-react',
+            '.json': 'json', '.yaml': 'yaml', '.yml': 'yaml',
+            '.html': 'html', '.css': 'css', '.sql': 'sql'
+        }
+        _, ext = os.path.splitext(path)
+        return ext_map.get(ext.lower(), 'text')
+    
+    def _analyze_file_for_tech_stack(self, path: str, content: str, result: dict):
+        """Analyze file content to detect tech stack and important patterns."""
+        path_lower = path.lower()
+        content_lower = content.lower()
+        
+        # Detect Backend Framework
+        if 'fastapi' in content_lower or 'from fastapi' in content_lower:
+            result["tech_stack"]["backend"]["framework"] = "FastAPI"
+        elif 'flask' in content_lower or 'from flask' in content_lower:
+            result["tech_stack"]["backend"]["framework"] = "Flask"
+        elif 'express' in content_lower or "require('express')" in content_lower:
+            result["tech_stack"]["backend"]["framework"] = "Express.js"
+        elif 'django' in content_lower:
+            result["tech_stack"]["backend"]["framework"] = "Django"
+        
+        # Detect Database - CRITICAL FOR PRESERVATION
+        if 'mongodb' in content_lower or 'mongoose' in content_lower or 'pymongo' in content_lower:
+            result["tech_stack"]["backend"]["database"] = "MongoDB"
+            result["must_preserve"].append(f"MongoDB database connection in {path}")
+        elif 'postgresql' in content_lower or 'psycopg' in content_lower or 'pg.' in content_lower:
+            result["tech_stack"]["backend"]["database"] = "PostgreSQL"
+            result["must_preserve"].append(f"PostgreSQL database connection in {path}")
+        elif 'mysql' in content_lower or 'pymysql' in content_lower:
+            result["tech_stack"]["backend"]["database"] = "MySQL"
+            result["must_preserve"].append(f"MySQL database connection in {path}")
+        elif 'sqlite' in content_lower:
+            result["tech_stack"]["backend"]["database"] = "SQLite"
+        elif 'prisma' in content_lower or path.endswith('.prisma'):
+            result["must_preserve"].append(f"Prisma schema in {path}")
+        
+        # Detect Frontend Framework
+        if 'react' in content_lower or 'from react' in content_lower or "'react'" in content_lower:
+            result["tech_stack"]["frontend"]["framework"] = "React"
+        elif 'vue' in content_lower:
+            result["tech_stack"]["frontend"]["framework"] = "Vue.js"
+        elif 'angular' in content_lower:
+            result["tech_stack"]["frontend"]["framework"] = "Angular"
+        elif 'next' in content_lower or "'next'" in content_lower:
+            result["tech_stack"]["frontend"]["framework"] = "Next.js"
+        
+        # Detect API Endpoints - MUST PRESERVE
+        if 'model' in path_lower or 'schema' in path_lower:
+            result["database_schemas"].append(path)
+            result["must_preserve"].append(f"Database schema/model in {path}")
+        
+        if '@app.route' in content or '@app.get' in content or '@app.post' in content:
+            result["must_preserve"].append(f"API endpoints in {path}")
+            # Extract endpoint patterns
+            import re
+            endpoints = re.findall(r'@app\.(get|post|put|delete|patch)\([\'"]([^\'"]+)[\'"]', content)
+            for method, endpoint in endpoints:
+                result["api_endpoints"].append(f"{method.upper()} {endpoint}")
+        
+        # Detect environment variables
+        if '.env' in path or 'config' in path_lower:
+            env_vars = re.findall(r'([A-Z_][A-Z0-9_]+)\s*=', content)
+            result["env_vars"].extend(env_vars[:10])  # Limit
+    
+    def _categorize_preservation_targets(self, result: dict):
+        """Categorize what must be preserved vs what can be modernized."""
+        # Must preserve: database, schemas, core API logic, auth
+        # Can modernize: UI, styling, performance optimizations
+        
+        for file_info in result["files"]:
+            path = file_info["path"]
+            
+            # MUST PRESERVE
+            if any(x in path.lower() for x in ['model', 'schema', 'database', 'db.', 'auth', 'middleware']):
+                if path not in [p for p in result["must_preserve"]]:
+                    result["must_preserve"].append(f"Core logic in {path}")
+            
+            # CAN MODERNIZE
+            elif any(x in path.lower() for x in ['component', 'page', 'view', 'template', 'style', 'css', 'ui']):
+                result["can_modernize"].append(path)
+        
+        # Add summary
+        result["preservation_summary"] = {
+            "database": result["tech_stack"]["backend"]["database"],
+            "total_files": len(result["files"]),
+            "must_preserve_count": len(result["must_preserve"]),
+            "can_modernize_count": len(result["can_modernize"]),
+            "api_endpoints_count": len(result["api_endpoints"])
+        }
+
+
     def _call_gemini(self, prompt: str, model: str = None) -> str:
         """Raw HTTP call to Gemini API to bypass SDK installation issues."""
         if not self.api_key:
@@ -489,104 +723,174 @@ This PR contains the **completely modernized** version of your legacy codebase.
         # If no markdown, assume raw text is code if it looks like it
         return text.strip()
 
-    def generate_modernization_plan(self, repo_url: str, instructions: str) -> str:
-        prompt = f"""
-        ACT AS: Elite Full-Stack Architect & AI Systems Engineer.
-        PROJECT: "Lazarus Engine" - Autonomous Code Resurrection System.
-
-        CONTEXT:
-        - Legacy Repository: {repo_url}
-        - User Preferences: "{instructions if instructions else 'Modern, production-ready stack'}"
-
-        YOUR MISSION:
-        Architect a complete, production-grade replacement that RESPECTS USER PREFERENCES while maintaining best practices.
-
-        ### STEP 1: PREFERENCE ANALYSIS (CRITICAL)
-        Analyze the user's preferences and extract:
-        1. **Design Preferences**: Color schemes, UI style (e.g., "dark mode", "minimalist", "cyberpunk")
-        2. **Feature Requirements**: Specific functionality they want (e.g., "authentication", "dashboard", "real-time updates")
-        3. **Tech Stack Preferences**: Any mentioned frameworks or libraries
-        4. **Performance Requirements**: Speed, scalability needs
-        
-        If user preferences are vague, infer intelligent defaults based on modern best practices.
-
-        ### STEP 2: LEGACY CONTRACT AUDIT
-        Based on the repository structure, identify:
-        - Likely API endpoints (e.g., `/api/login`, `/api/users`)
-        - Data models and schemas
-        - Authentication patterns
-        - Frontend routes and pages
-        
-        **Constraint**: New system MUST maintain API compatibility for zero-downtime migration.
-
-        ### STEP 3: ARCHITECTURE DESIGN (Preference-Driven)
-        
-        **Backend Strategy**:
-        - Stack: Python FastAPI (high performance, modern async)
-        - Authentication: JWT tokens with secure password hashing
-        - Database: SQLite for prototyping (easily upgradable to PostgreSQL)
-        - API Design: RESTful with automatic OpenAPI docs
-        - **Apply user preferences**: If they want specific features, plan the endpoints
-        
-        **Frontend Strategy**:
-        - Stack: Next.js 15 (App Router) with TypeScript
-        - Styling: Tailwind CSS with custom design system
-        - **Apply user preferences**: 
-          * Use their color scheme in Tailwind config
-          * Match their desired UI style (glassmorphism, neumorphism, etc.)
-          * Implement requested features (dashboards, charts, forms)
-        - State Management: React hooks (simple, effective)
-        - API Integration: Environment-based URLs for flexibility
-
-        ### STEP 4: INTEGRATION PLANNING
-        - CORS: Wildcard origins for sandbox compatibility
-        - Environment Variables: `NEXT_PUBLIC_API_URL` for dynamic backend connection
-        - Build Process: Production builds for optimal performance
-        - Error Handling: Graceful fallbacks and user-friendly messages
-
-        ### STEP 5: QUALITY ASSURANCE
-        Plan for:
-        - Type safety (TypeScript, Pydantic)
-        - Input validation on both frontend and backend
-        - Secure authentication flow
-        - Responsive design (mobile-first)
-        - Performance optimization (code splitting, lazy loading)
-
-        OUTPUT FORMAT:
-        Provide a detailed architectural plan in this structure:
-        
-        **USER PREFERENCES INTERPRETATION**:
-        [Explain how you interpreted their preferences]
-        
-        **BACKEND ARCHITECTURE**:
-        - Endpoints: [List all planned API routes]
-        - Models: [Data structures]
-        - Security: [Auth strategy]
-        
-        **FRONTEND ARCHITECTURE**:
-        - Pages: [All routes and their purpose]
-        - Components: [Key reusable components]
-        - Design System: [Colors, typography, spacing based on user preferences]
-        
-        **INTEGRATION STRATEGY**:
-        [How frontend and backend connect]
-        
-        CRITICAL RULES:
-        - DO NOT ask questions or wait for approval
-        - OUTPUT the complete plan immediately
-        - RESPECT user preferences while maintaining quality
-        - Be specific and actionable
+    def generate_modernization_plan(self, repo_url: str, instructions: str, deep_scan_result: dict = None) -> str:
         """
+        PRESERVATION-FIRST PLANNING
+        Analyzes existing codebase and creates a plan that PRESERVES functionality
+        while only modernizing UI and optimizing performance.
+        """
+        
+        # Build context from deep scan
+        if deep_scan_result:
+            tech_stack = deep_scan_result.get("tech_stack", {})
+            must_preserve = deep_scan_result.get("must_preserve", [])
+            can_modernize = deep_scan_result.get("can_modernize", [])
+            api_endpoints = deep_scan_result.get("api_endpoints", [])
+            files = deep_scan_result.get("files", [])
+            
+            # Create file contents summary
+            files_content = ""
+            for f in files[:30]:  # Limit to avoid token overflow
+                files_content += f"\n\n=== FILE: {f['path']} ===\n```{f['language']}\n{f['content'][:2000]}\n```"
+            
+            preservation_context = f"""
+═══════════════════════════════════════════════════════════════════════════════
+EXISTING CODEBASE ANALYSIS (FROM DEEP SCAN)
+═══════════════════════════════════════════════════════════════════════════════
+
+DETECTED TECH STACK:
+- Backend Framework: {tech_stack.get('backend', {}).get('framework', 'Unknown')}
+- Database: {tech_stack.get('backend', {}).get('database', 'Unknown')}
+- Frontend Framework: {tech_stack.get('frontend', {}).get('framework', 'Unknown')}
+
+🔒 MUST PRESERVE (DO NOT CHANGE):
+{chr(10).join(['- ' + item for item in must_preserve[:20]])}
+
+✅ CAN MODERNIZE (UI/UX ONLY):
+{chr(10).join(['- ' + item for item in can_modernize[:20]])}
+
+DETECTED API ENDPOINTS (KEEP EXACTLY AS-IS):
+{chr(10).join(['- ' + ep for ep in api_endpoints[:20]])}
+
+───────────────────────────────────────────────────────────────────────────────
+FULL FILE CONTENTS (USE THESE AS BASE):
+───────────────────────────────────────────────────────────────────────────────
+{files_content}
+"""
+        else:
+            preservation_context = "[DEEP SCAN NOT AVAILABLE - Using path-only mode]"
+        
+        prompt = f"""
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  LAZARUS ENGINE - PRESERVATION-FIRST MODERNIZATION SYSTEM                   ║
+║  VERSION: 4.0 - PRESERVE & ENHANCE (NOT REPLACE!)                           ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+ROLE: You are an elite architect who PRESERVES working systems while enhancing them.
+
+═══════════════════════════════════════════════════════════════════════════════
+🎯 THE GOLDEN RULE
+═══════════════════════════════════════════════════════════════════════════════
+
+"IF IT WORKS, DON'T BREAK IT. IF IT'S UGLY, MAKE IT PRETTY. IF IT'S SLOW, MAKE IT FAST."
+
+YOU MUST:
+1. PRESERVE all existing functionality - every API endpoint, every database query
+2. KEEP the same database (MongoDB stays MongoDB, PostgreSQL stays PostgreSQL)
+3. MAINTAIN all existing data schemas and models
+4. ONLY modernize the UI/UX layer
+5. OPTIMIZE slow code (but output must remain identical)
+6. ADD new features ON TOP of existing ones (don't replace)
+
+YOU MUST NOT:
+❌ Change the database type (e.g., MongoDB → SQLite is FORBIDDEN)
+❌ Rename or remove existing API endpoints
+❌ Modify existing data schemas
+❌ Remove any existing functionality
+❌ Create a "new architecture" - you are ENHANCING, not replacing!
+
+═══════════════════════════════════════════════════════════════════════════════
+📦 LEGACY REPOSITORY
+═══════════════════════════════════════════════════════════════════════════════
+
+Repository URL: {repo_url}
+User Preferences: "{instructions if instructions else 'Modernize UI while preserving all functionality'}"
+
+{preservation_context}
+
+═══════════════════════════════════════════════════════════════════════════════
+📋 YOUR PLANNING TASK
+═══════════════════════════════════════════════════════════════════════════════
+
+PHASE 1: PRESERVATION AUDIT
+Analyze the existing codebase and list:
+1. All API endpoints that MUST work exactly as before
+2. Database type and connection (DO NOT CHANGE)
+3. Data models/schemas (PRESERVE EXACTLY)
+4. Authentication method (KEEP SAME)
+5. Core business logic (KEEP SAME)
+
+PHASE 2: MODERNIZATION TARGETS
+Identify ONLY what can be safely modernized:
+1. UI Components - can be restyled, restructured
+2. CSS/Styling - can be modernized to Tailwind
+3. Frontend framework upgrades (React class → hooks, etc.)
+4. Performance optimizations (same output, faster execution)
+5. Code cleanup (better structure, same functionality)
+
+PHASE 3: ENHANCED ARCHITECTURE
+Design the modernized version:
+
+**Backend (MINIMAL CHANGES)**:
+- KEEP: Same framework (or compatible upgrade like Flask → FastAPI with same routes)
+- KEEP: Same database and connection strings
+- KEEP: Same API endpoints (exact same paths and methods)
+- KEEP: Same authentication flow
+- ADD: Better error handling, logging (optional)
+- ADD: Health check endpoint at / (if not exists)
+- ADD: CORS middleware for sandbox compatibility
+
+**Frontend (CAN MODERNIZE)**:
+- UPGRADE: To Next.js 15 with modern patterns
+- RESTYLE: Using Tailwind CSS with custom design system
+- PRESERVE: All existing pages and their functionality
+- PRESERVE: All API calls (same endpoints)
+- ENHANCE: UI/UX with modern design patterns
+
+PHASE 4: OUTPUT REQUIREMENTS
+
+Your plan MUST include:
+
+1. **PRESERVATION CHECKLIST**:
+   - [ ] All existing API endpoints preserved: [list them]
+   - [ ] Database type unchanged: [type]
+   - [ ] Data schemas unchanged: [list key schemas]
+   - [ ] Authentication method unchanged: [method]
+
+2. **BACKEND PLAN**:
+   - Framework: [SAME as original OR compatible upgrade]
+   - Database: [SAME - include connection string pattern]
+   - Endpoints to copy: [list ALL from original]
+   - New additions: [only new helper endpoints]
+
+3. **FRONTEND PLAN**:
+   - Pages to recreate: [list all pages from original]
+   - Components to modernize: [list components]
+   - Design system: [colors, typography based on preferences]
+   - API integration: [same endpoints as original]
+
+4. **FILE STRUCTURE**:
+   List all files to generate, marking which are:
+   - [PRESERVE] - Copy logic from original
+   - [MODERNIZE] - Same function, new UI
+   - [NEW] - Added functionality
+
+CRITICAL: Return an immediately implementable plan. Do not ask questions.
+Output format: Plain text architectural plan with clear sections.
+"""
         # Use Gemini 3 Pro for complex reasoning
         return self._call_gemini(prompt, model="gemini-3-pro-preview")
 
-    def generate_code(self, plan: str) -> dict:
+    def generate_code(self, plan: str, deep_scan_result: dict = None) -> dict:
         """
         Returns info about the code to be generated (Multiple Files, Nested Structure).
-        Uses comprehensive prompt from prompts.py module.
+        Uses PRESERVATION-FIRST prompt from prompts.py module.
+        
+        deep_scan_result: Contains existing codebase info for preservation.
         """
         # Get the comprehensive prompt from the prompts module
-        prompt = get_code_generation_prompt(plan)
+        # Pass deep_scan_result for preservation context (existing code, database, etc.)
+        prompt = get_code_generation_prompt(plan, deep_scan_result)
         
         # Phase 2: Write Code -> Gemini 3 Pro (Needs Reasoning)
         response = self._call_gemini(prompt, model="gemini-3-pro-preview")
@@ -902,6 +1206,7 @@ except Exception as e:
     def process_resurrection_stream(self, repo_url: str, instructions: str):
         """Generator that yields logs and results in real-time."""
         logs = []
+        deep_scan_result = None  # Store deep scan for reuse
         
         def emit_log(msg):
             logs.append(msg)
@@ -910,24 +1215,39 @@ except Exception as e:
         def emit_debug(msg):
             return {"type": "debug", "content": msg}
 
-        # 1. Plan
-        yield emit_log("Initiating Deep Scan of Legacy Repository...")
+        # 1. DEEP SCAN - Fetch ALL file contents for preservation
+        yield emit_log("🔍 Initiating DEEP SCAN of Legacy Repository...")
+        yield emit_log("📂 Fetching ALL file contents for preservation analysis...")
         
-        # ACTUAL SCAN
-        scanned_files = self.scan_repository(repo_url)
-        yield emit_debug(f"[DEBUG] Scanned Repository Files:\n" + "\n".join(scanned_files[:20]) + ("\n... (truncated)" if len(scanned_files) > 20 else ""))
+        # DEEP SCAN (fetches full file contents)
+        deep_scan_result = self.scan_repository_deep(repo_url)
+        
+        tech_stack = deep_scan_result.get("tech_stack", {})
+        must_preserve = deep_scan_result.get("must_preserve", [])
+        files_analyzed = len(deep_scan_result.get("files", []))
+        
+        yield emit_debug(f"[DEBUG] Deep Scan Complete:\n  Files Analyzed: {files_analyzed}\n  Tech Stack: {tech_stack}\n  Must Preserve: {len(must_preserve)} items")
+        
+        if tech_stack.get("backend", {}).get("database"):
+            yield emit_log(f"🔒 Detected Database: {tech_stack['backend']['database']} (WILL BE PRESERVED)")
+        if tech_stack.get("backend", {}).get("framework"):
+            yield emit_log(f"⚙️ Detected Backend: {tech_stack['backend']['framework']}")
+        if tech_stack.get("frontend", {}).get("framework"):
+            yield emit_log(f"🎨 Detected Frontend: {tech_stack['frontend']['framework']}")
 
-        # Check for error in plan
-        plan = self.generate_modernization_plan(repo_url, instructions)
+        # 2. PRESERVATION-FIRST PLANNING
+        yield emit_log("📋 Creating PRESERVATION-FIRST Modernization Plan...")
+        
+        plan = self.generate_modernization_plan(repo_url, instructions, deep_scan_result)
         yield emit_debug(f"[DEBUG] Generated Plan:\n{plan}")
 
         if "[ERROR]" in plan:
-             yield emit_log("Warning: Connection Unstable. Engaged Fallback Protocols.")
+             yield emit_log("⚠️ Warning: Connection Unstable. Engaged Fallback Protocols.")
              fallback_mode = True
         else:
              fallback_mode = False
              
-        yield emit_log("Architecting Resurrection Blueprint...")
+        yield emit_log("🏗️ Architecting Enhanced Blueprint (Preserving Core Logic)...")
 
         # 2. Code Gen with COMPREHENSIVE Auto-Healing Loop
         MAX_RETRIES = 3  # Increased from 2
@@ -945,10 +1265,12 @@ except Exception as e:
                     # Build comprehensive error context for AI
                     error_context = self._build_error_context(all_errors)
                     plan_with_error = plan + error_context
-                    code_data = self.generate_code(plan_with_error)
+                    # Pass deep_scan_result for preservation context
+                    code_data = self.generate_code(plan_with_error, deep_scan_result)
                 else:
-                    yield emit_log("Synthesizing Modern Cloud Infrastructure...")
-                    code_data = self.generate_code(plan)
+                    yield emit_log("🔨 Synthesizing Enhanced Infrastructure (Preserving Core Logic)...")
+                    # Pass deep_scan_result for preservation context
+                    code_data = self.generate_code(plan, deep_scan_result)
                 
                 files = code_data.get('files', [])
                 entrypoint = code_data.get('entrypoint', 'modernized_stack/backend/main.py')
