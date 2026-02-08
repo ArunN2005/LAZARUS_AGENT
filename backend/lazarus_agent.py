@@ -1208,7 +1208,65 @@ except:
                 backend_url = f"https://{self.sandbox.get_host(node_port)}"
                 print(f"[*] Node.js Backend Live at: {backend_url}")
                 
-                # For Node.js projects, just return the backend URL since frontend/backend are often integrated
+                # ═══════════════════════════════════════════════════════════
+                # CHECK FOR FRONTEND (Next.js, React, Vue, etc.)
+                # ═══════════════════════════════════════════════════════════
+                frontend_dirs = []
+                for f in files:
+                    path = f['filename'].lower()
+                    if ('frontend' in path or 'client' in path or 'web' in path) and f['filename'].endswith('package.json'):
+                        frontend_dirs.append(os.path.dirname(f['filename']))
+                    elif 'next.config' in path or 'vite.config' in path:
+                        frontend_dirs.append(os.path.dirname(f['filename']))
+                
+                # Deduplicate
+                frontend_dirs = list(set(frontend_dirs))
+                
+                if frontend_dirs:
+                    frontend_dir = frontend_dirs[0]
+                    print(f"[*] 🎨 Frontend Detected: {frontend_dir}")
+                    
+                    # Install frontend dependencies
+                    print(f"[*] Installing Frontend dependencies (npm install)...")
+                    install_result = self.sandbox.commands.run(f"cd {frontend_dir} && npm install --force", timeout=300)
+                    if install_result.exit_code != 0:
+                        print(f"[!] npm install warning: {install_result.stderr[:200] if install_result.stderr else 'No stderr'}")
+                    
+                    # Inject Backend URL into .env.local for Next.js
+                    print(f"[*] Injecting Backend URL into frontend environment...")
+                    env_content = f"NEXT_PUBLIC_API_URL={backend_url}\nVITE_API_URL={backend_url}\nREACT_APP_API_URL={backend_url}\n"
+                    self.sandbox.files.write(f"{frontend_dir}/.env.local", env_content)
+                    self.sandbox.files.write(f"{frontend_dir}/.env", env_content)
+                    
+                    # Build frontend (for Next.js, React)
+                    print(f"[*] Building Frontend for production...")
+                    build_result = self.sandbox.commands.run(f"cd {frontend_dir} && npm run build", timeout=300)
+                    
+                    if build_result.exit_code != 0:
+                        error_output = (build_result.stderr or '') + (build_result.stdout or '')
+                        print(f"[!] Frontend build failed. Error:\n{error_output[:500]}")
+                        # Return with just backend URL if frontend fails
+                        return f"Node.js Backend started (Frontend build failed).\n[PREVIEW_URL] {backend_url}\n\n=== BUILD ERROR ===\n{error_output[:500]}"
+                    
+                    # Start frontend in production mode
+                    print(f"[*] Starting Frontend in production mode...")
+                    # Try different start commands based on framework
+                    start_cmd = f"cd {frontend_dir} && npm start -- -p 3000 > frontend.log 2>&1"
+                    self.sandbox.commands.run(start_cmd, background=True)
+                    
+                    # Wait for frontend to boot
+                    time.sleep(10)
+                    
+                    # Get frontend URL
+                    frontend_host = self.sandbox.get_host(3000)
+                    frontend_url = f"https://{frontend_host}"
+                    
+                    print(f"[*] 🎨 Frontend Live at: {frontend_url}")
+                    print(f"[*] Frontend → Backend Connection: {backend_url}")
+                    
+                    return f"Dual-Stack Deployed Successfully.\n[PREVIEW_URL] {frontend_url}\n[BACKEND_URL] {backend_url}"
+                
+                # No frontend detected - just return backend URL
                 return f"Node.js Server started successfully.\n[PREVIEW_URL] {backend_url}"
                 
             elif runtime == "python" or entrypoint.endswith('.py'):
