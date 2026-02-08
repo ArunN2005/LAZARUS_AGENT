@@ -814,11 +814,15 @@ class LazarusEngine:
                     time.sleep(3)
                     try:
                         # Use Python instead of curl (curl may not be installed)
+                        # Note: urlopen throws HTTPError for 4xx/5xx, so we catch it
                         check_script = """
 import urllib.request
+import urllib.error
 try:
     response = urllib.request.urlopen('http://127.0.0.1:8000', timeout=2)
     print(response.status)
+except urllib.error.HTTPError as e:
+    print(e.code)
 except Exception as e:
     print('error')
 """
