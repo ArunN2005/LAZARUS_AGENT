@@ -516,7 +516,7 @@ This PR contains the **completely modernized** version of your legacy codebase.
             
             print(f"[*] Deep scanning {len(tree)} files in repository...")
             files_fetched = 0
-            max_files = 100  # Increased to capture more files from original repo
+            # NO LIMIT - Fetch ALL files! Gemini has a large context window.
             
             for item in tree:
                 if item['type'] != 'blob':
@@ -542,7 +542,7 @@ This PR contains the **completely modernized** version of your legacy codebase.
                 if any(skip_dir in path for skip_dir in skip_dirs):
                     should_fetch = False
                 
-                if should_fetch and files_fetched < max_files:
+                if should_fetch:  # Fetch ALL files - no limit!
                     try:
                         # Fetch file content
                         content_url = f"https://api.github.com/repos/{owner}/{repo_name}/contents/{path}?ref={default_branch}"
@@ -744,10 +744,10 @@ This PR contains the **completely modernized** version of your legacy codebase.
             files = deep_scan_result.get("files", [])
             file_count = len(files)
             
-            # Create file contents summary
+            # Create file contents - NO LIMITS! Send FULL content to Gemini
             files_content = ""
-            for f in files[:30]:  # Limit to avoid token overflow
-                files_content += f"\n\n=== FILE: {f['path']} ===\n```{f['language']}\n{f['content'][:2000]}\n```"
+            for f in files:  # ALL files - no limit!
+                files_content += f"\n\n=== FILE: {f['path']} ===\n```{f['language']}\n{f['content']}\n```"  # FULL content!
             
             preservation_context = f"""
 ═══════════════════════════════════════════════════════════════════════════════
@@ -1171,9 +1171,33 @@ Output format: Plain text architectural plan with clear sections.
                     package_dir = os.path.dirname(package_json['filename']) or "."
                     print(f"[*] Found package.json in: {package_dir}")
                     
-                    # Install Node.js dependencies in package.json directory
-                    print("[*] Installing Node.js dependencies (npm install)...")
-                    install_result = self.sandbox.commands.run(f"cd {package_dir} && npm install", timeout=300)
+                    # DYNAMIC DEPENDENCY DETECTION - Parse the package.json content!
+                    try:
+                        # Get the content of package.json (it's in our generated files)
+                        package_content = package_json.get('content', '')
+                        if package_content:
+                            import json as json_module
+                            pkg_data = json_module.loads(package_content)
+                            deps = list(pkg_data.get('dependencies', {}).keys())
+                            dev_deps = list(pkg_data.get('devDependencies', {}).keys())
+                            all_deps = deps + dev_deps
+                            
+                            if all_deps:
+                                print(f"[*] Detected dependencies from package.json: {', '.join(all_deps[:15])}{'...' if len(all_deps) > 15 else ''}")
+                                # Install ALL detected dependencies
+                                deps_str = ' '.join(all_deps)
+                                print(f"[*] Installing {len(all_deps)} dependencies dynamically...")
+                                install_result = self.sandbox.commands.run(f"cd {package_dir} && npm init -y && npm install {deps_str}", timeout=300)
+                            else:
+                                print("[*] No dependencies found in package.json, running npm install anyway...")
+                                install_result = self.sandbox.commands.run(f"cd {package_dir} && npm install", timeout=300)
+                        else:
+                            print("[*] Installing Node.js dependencies (npm install)...")
+                            install_result = self.sandbox.commands.run(f"cd {package_dir} && npm install", timeout=300)
+                    except Exception as pkg_err:
+                        print(f"[!] Error parsing package.json: {pkg_err}, falling back to npm install...")
+                        install_result = self.sandbox.commands.run(f"cd {package_dir} && npm install", timeout=300)
+                    
                     if install_result.exit_code != 0:
                         print(f"[!] npm install warning: {install_result.stderr[:200] if install_result.stderr else 'No stderr'}")
                     
