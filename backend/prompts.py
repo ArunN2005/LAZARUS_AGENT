@@ -1,58 +1,72 @@
 """
-Lazarus Engine - PRESERVATION-FIRST Code Generation Prompts
-Version 4.0 - Preserve & Enhance (NOT Replace!)
+Lazarus Engine - TRUE PRESERVATION-FIRST Code Generation Prompts
+Version 5.0 - PRESERVE ORIGINAL FILES, ENHANCE IN-PLACE
 
 This module contains all prompts used by the Lazarus Engine.
-The core philosophy: IF IT WORKS, DON'T BREAK IT.
+The core philosophy: OUTPUT ALL ORIGINAL FILES WITH ENHANCEMENTS.
 """
 
 def get_code_generation_prompt(plan: str, deep_scan_result: dict = None) -> str:
     """
-    Returns the PRESERVATION-FIRST code generation prompt.
-    Key principle: PRESERVE existing functionality, only MODERNIZE UI.
+    Returns the TRUE PRESERVATION-FIRST code generation prompt.
+    Key principle: OUTPUT ALL ORIGINAL FILES with UI enhancements.
     """
     
-    # Build existing code context if deep scan available
+    # Build list of ALL files that MUST be output
+    file_list = ""
     existing_code_context = ""
+    total_files = 0
+    
     if deep_scan_result:
         files = deep_scan_result.get("files", [])
         tech_stack = deep_scan_result.get("tech_stack", {})
         must_preserve = deep_scan_result.get("must_preserve", [])
         api_endpoints = deep_scan_result.get("api_endpoints", [])
+        total_files = len(files)
+        
+        # Build MANDATORY file list - ALL files must be output!
+        file_list = "YOU MUST OUTPUT ALL OF THESE FILES (ENHANCED):\n"
+        for f in files:
+            file_list += f"  📁 {f['path']}\n"
         
         # Build file contents for reference
-        for f in files[:25]:  # Limit to avoid token overflow
+        for f in files:
             existing_code_context += f"""
 ══════════════════════════════════════════════════════════════
-📁 EXISTING FILE: {f['path']}
+📁 ORIGINAL FILE: {f['path']}
 ══════════════════════════════════════════════════════════════
 ```{f['language']}
-{f['content'][:3000]}
+{f['content']}
 ```
 """
         
         preservation_rules = f"""
 ═══════════════════════════════════════════════════════════════════════════════
-🔒 PRESERVATION REQUIREMENTS (CRITICAL - DO NOT VIOLATE!)
+🔒 PRESERVATION REQUIREMENTS (CRITICAL!)
 ═══════════════════════════════════════════════════════════════════════════════
+
+TOTAL FILES IN ORIGINAL REPOSITORY: {total_files}
+>>> YOU MUST OUTPUT ALL {total_files} FILES! <<<
+
+{file_list}
 
 DETECTED DATABASE: {tech_stack.get('backend', {}).get('database', 'Unknown')}
->> YOU MUST USE THE SAME DATABASE TYPE! DO NOT SWITCH TO A DIFFERENT DB! <<
+>> KEEP THE SAME DATABASE TYPE! DO NOT SWITCH TO A DIFFERENT DB! <<
 
 DETECTED BACKEND FRAMEWORK: {tech_stack.get('backend', {}).get('framework', 'Unknown')}
->> KEEP THE SAME FRAMEWORK OR A COMPATIBLE UPGRADE <<
+>> KEEP THE SAME FRAMEWORK! <<
 
 DETECTED FRONTEND FRAMEWORK: {tech_stack.get('frontend', {}).get('framework', 'Unknown')}
->> CAN BE UPGRADED TO Next.js 15 <<
+>> ENHANCE IN-PLACE - DO NOT REPLACE WITH A DIFFERENT FRAMEWORK! <<
 
-MUST PRESERVE (COPY EXACTLY FROM ORIGINAL):
-{chr(10).join(['  🔒 ' + item for item in must_preserve[:15]])}
+MUST PRESERVE (COPY FROM ORIGINALS):
+{chr(10).join(['  🔒 ' + item for item in must_preserve[:20]])}
 
 EXISTING API ENDPOINTS (KEEP EXACT SAME PATHS):
-{chr(10).join(['  📍 ' + ep for ep in api_endpoints[:15]])}
+{chr(10).join(['  📍 ' + ep for ep in api_endpoints[:20]])}
 
 ═══════════════════════════════════════════════════════════════════════════════
-📚 EXISTING CODEBASE (USE AS REFERENCE):
+📚 ALL ORIGINAL FILES (ENHANCE THESE, KEEP SAME PATHS):
 ═══════════════════════════════════════════════════════════════════════════════
 {existing_code_context}
 """
@@ -60,34 +74,45 @@ EXISTING API ENDPOINTS (KEEP EXACT SAME PATHS):
         preservation_rules = """
 [WARNING: No deep scan available. Generate from plan only.]
 """
+        total_files = 0
     
     return f"""
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  LAZARUS ENGINE - PRESERVATION-FIRST CODE GENERATION                        ║
-║  VERSION: 4.0 - PRESERVE & ENHANCE (NOT REPLACE!)                           ║
+║  LAZARUS ENGINE - TRUE PRESERVATION-FIRST CODE GENERATION                   ║
+║  VERSION: 5.0 - PRESERVE ALL ORIGINAL FILES, ENHANCE IN-PLACE              ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
 🎯 THE GOLDEN RULE:
 ═══════════════════════════════════════════════════════════════════════════════
 "IF IT WORKS, DON'T BREAK IT. IF IT'S UGLY, MAKE IT PRETTY. IF IT'S SLOW, MAKE IT FAST."
 
-YOU MUST:
-✅ PRESERVE all existing database connections (MongoDB stays MongoDB!)
-✅ PRESERVE all existing API endpoints (same paths, same methods)
-✅ PRESERVE all existing data schemas and models
-✅ PRESERVE all existing business logic
-✅ ONLY modernize the UI/UX layer
-✅ OPTIMIZE slow code (but output must remain identical)
+⚠️ CRITICAL REQUIREMENT:
+═══════════════════════════════════════════════════════════════════════════════
+THE ORIGINAL REPOSITORY HAS {total_files} FILES.
+YOU MUST OUTPUT ALL {total_files} FILES WITH ENHANCEMENTS!
+
+DO NOT create a new structure like "modernized_stack/".
+DO NOT replace original files with Next.js/React if original was HTML.
+DO output EVERY original file with the SAME PATH but ENHANCED content.
+
+WHAT "ENHANCEMENT" MEANS:
+✅ Better CSS styling (modern, glassmorphism, dark mode)
+✅ Better HTML structure (semantic tags, accessibility)
+✅ Better JavaScript (ES6+, cleaner code)
+✅ Same functionality, prettier appearance
+✅ Same database connections, same API endpoints
+✅ Same file paths!
 
 YOU MUST NOT:
 ❌ Change database type (MongoDB → SQLite is FORBIDDEN!)
-❌ Rename or remove any API endpoints
-❌ Change data schemas or models
+❌ Change framework (Express → FastAPI is FORBIDDEN for JS projects!)
+❌ Rename or remove any files
+❌ Create new folder structure like "modernized_stack/"
+❌ Replace HTML files with React/Next.js components
 ❌ Remove any existing functionality
-❌ Create completely new architecture
 
 ═══════════════════════════════════════════════════════════════════════════════
-SECTION 1: ARCHITECTURAL PLAN (From Planning Phase)
+SECTION 1: ARCHITECTURAL PLAN
 ═══════════════════════════════════════════════════════════════════════════════
 
 {plan}
@@ -98,199 +123,89 @@ SECTION 1: ARCHITECTURAL PLAN (From Planning Phase)
 SECTION 2: OUTPUT FORMAT (STRICT XML)
 ═══════════════════════════════════════════════════════════════════════════════
 
-Output ALL files in this exact XML format:
-<file path="modernized_stack/folder/filename.ext">
-... complete file content ...
+Output ALL files using the ORIGINAL file paths in this exact XML format:
+
+<file path="Home/Home/admin.html">
+... enhanced file content ...
+</file>
+
+<file path="Home/Home/adminserver.js">
+... enhanced file content ...
 </file>
 
 RULES:
+- Use the EXACT SAME file paths as the original files!
+- Output ALL {total_files} files from the original repository
 - Each file MUST have COMPLETE content (NO placeholders like "// ..." or "TODO")
 - NO markdown code blocks (```) inside the XML
 - One continuous stream of <file> elements
 - Every file must be immediately runnable
 
 ═══════════════════════════════════════════════════════════════════════════════
-SECTION 3: BACKEND PRESERVATION RULES
+SECTION 3: HTML FILE ENHANCEMENT RULES
 ═══════════════════════════════════════════════════════════════════════════════
 
-🔒 DATABASE RULES (CRITICAL!):
-- If original uses MongoDB:  USE MONGODB (pymongo/motor)
-- If original uses PostgreSQL: USE POSTGRESQL (psycopg2/asyncpg)
-- If original uses MySQL: USE MYSQL (pymysql)
-- NEVER switch database types!
-- COPY the exact connection string pattern from original
+For HTML files, ENHANCE by:
+1. Add a modern CSS stylesheet link (create a new modern.css if needed)
+2. Improve the existing HTML structure (semantic tags)
+3. Keep ALL existing JavaScript functionality
+4. Keep ALL form fields, buttons, and interactions
+5. Keep ALL API calls and backend connections
+6. Modernize colors, fonts, and layout
 
-📍 API ENDPOINT RULES:
-- COPY all existing endpoints with EXACT same paths
-- Keep same HTTP methods (GET, POST, PUT, DELETE)
-- Keep same request/response schemas
-- Add CORS middleware for sandbox compatibility
-- Add health check at / if not exists
-
-📋 SCHEMA/MODEL RULES:
-- PRESERVE exact field names from original models
-- PRESERVE exact data types
-- PRESERVE relationships between models
-- DO NOT rename fields or change types
-
-BACKEND TEMPLATE (Preserving Original Structure):
-```python
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-# KEEP ORIGINAL DATABASE IMPORTS:
-# If MongoDB: from motor.motor_asyncio import AsyncIOMotorClient
-# If PostgreSQL: import asyncpg
-# If MySQL: import aiomysql
-
-app = FastAPI(
-    title="Lazarus Resurrected API",
-    description="Modernized by Lazarus Engine - Logic PRESERVED",
-    version="2.0.0"
-)
-
-# CORS for sandbox
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# COPY DATABASE CONNECTION FROM ORIGINAL
-# Do not change the database type or connection pattern!
-
-# Health check
-@app.get("/")
-def health_check():
-    return {{"status": "online", "service": "lazarus-backend"}}
-
-# ========== COPY ALL EXISTING ENDPOINTS FROM ORIGINAL ==========
-# Use EXACT same paths and methods!
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
-```
+EXAMPLE ENHANCEMENT:
+Original: <div class="container"> → Enhanced: <main class="container glass-panel">
+Original: Old inline styles → Enhanced: Modern CSS classes
+Original: Old fonts → Enhanced: Modern Google Fonts (Inter, Roboto)
 
 ═══════════════════════════════════════════════════════════════════════════════
-SECTION 4: FRONTEND MODERNIZATION (CAN CHANGE UI/UX)
+SECTION 4: JAVASCRIPT/NODE.JS FILE ENHANCEMENT RULES
 ═══════════════════════════════════════════════════════════════════════════════
 
-✅ ALLOWED CHANGES:
-- Upgrade to Next.js 15 with App Router
-- Restyle with Tailwind CSS
-- Modernize component structure
-- Add animations, better UX
-- Improve responsive design
-
-🔒 MUST PRESERVE:
-- All existing pages and their PURPOSE
-- All API calls (same endpoints as backend)
-- All form fields and validations
-- All user flows (login, signup, etc.)
-
-FRONTEND STRUCTURE:
-modernized_stack/frontend/
-├── package.json
-├── next.config.mjs
-├── tailwind.config.ts
-├── postcss.config.mjs
-├── tsconfig.json
-└── app/
-    ├── layout.tsx       # MUST import globals.css
-    ├── globals.css      # MUST have @tailwind directives
-    ├── page.tsx         # Home page
-    └── [recreate all pages from original]
+For .js files (server, utilities, etc.):
+1. KEEP the exact same database connection (MongoDB stays MongoDB!)
+2. KEEP the exact same API endpoints
+3. KEEP the exact same route handlers
+4. Can improve code style (var → const/let)
+5. Can add error handling
+6. Can add logging
+7. MUST NOT change core functionality
 
 ═══════════════════════════════════════════════════════════════════════════════
-SECTION 5: SANDBOX COMPATIBILITY - FILE PATH RESTRICTIONS
+SECTION 5: ADD THESE NEW FILES (OPTIONAL ENHANCEMENTS)
 ═══════════════════════════════════════════════════════════════════════════════
 
-🚫 FORBIDDEN CHARACTERS IN FILE/FOLDER NAMES:
-- NO parentheses: ( )
-- NO brackets: [ ] {{ }}
-- NO spaces
-- NO special chars: $ & * ? ! | ; < > ` ' "
+You MAY add these new files to enhance the project:
+- modern.css (or enhance existing CSS files)
+- package.json (if not exists, or enhance existing)
 
-✅ USE ONLY: alphanumeric, hyphens (-), underscores (_), dots (.)
-
-❌ WRONG: app/(auth)/login/page.tsx
-✅ CORRECT: app/auth/login/page.tsx
+But the PRIORITY is outputting ALL original files with enhancements.
 
 ═══════════════════════════════════════════════════════════════════════════════
-SECTION 6: TYPESCRIPT SYNTAX RULES
-═══════════════════════════════════════════════════════════════════════════════
-
-| WRONG (Python)          | CORRECT (TypeScript)              |
-|-------------------------|-----------------------------------|
-| name: str               | name: string                      |
-| count: int              | count: number                     |
-| active: bool            | active: boolean                   |
-| items: List[str]        | items: string[]                   |
-| data: Dict              | data: Record<string, any>         |
-| Optional[str]           | string | null                     |
-
-═══════════════════════════════════════════════════════════════════════════════
-SECTION 7: DOCKER COMPOSE
-═══════════════════════════════════════════════════════════════════════════════
-
-FILE: modernized_stack/docker-compose.yml
-
-```yaml
-version: '3.8'
-
-services:
-  backend:
-    build: 
-      context: ./backend
-      dockerfile: Dockerfile
-    ports:
-      - "8000:8000"
-    environment:
-      - PYTHONUNBUFFERED=1
-      # PRESERVE original environment variables!
-    restart: unless-stopped
-
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    ports:
-      - "3000:3000"
-    environment:
-      - NEXT_PUBLIC_API_URL=http://backend:8000
-    depends_on:
-      - backend
-    restart: unless-stopped
-```
-
-═══════════════════════════════════════════════════════════════════════════════
-SECTION 8: FINAL CHECKLIST (Verify Before Output)
+SECTION 6: FINAL CHECKLIST (Verify Before Output)
 ═══════════════════════════════════════════════════════════════════════════════
 
 🔒 PRESERVATION CHECKLIST:
-□ Database type is SAME as original (not switched!)
+□ All {total_files} original files are included in output
+□ All files use their ORIGINAL paths (not modernized_stack/)
+□ Database type is SAME as original
 □ All existing API endpoints preserved with exact paths
-□ All data models/schemas preserved with exact fields
-□ All existing pages recreated with same functionality
+□ All existing functionality preserved
+□ No files were renamed or deleted
 
-✅ MODERNIZATION CHECKLIST:
-□ Backend has CORS middleware
-□ Backend has health check at GET /
-□ Frontend uses Next.js 15 with App Router
-□ Frontend uses Tailwind CSS
-□ layout.tsx imports globals.css
-□ globals.css has @tailwind directives
-□ All config files present (next.config.mjs, tsconfig.json, etc.)
+✅ ENHANCEMENT CHECKLIST:
+□ CSS is modernized (dark mode, glassmorphism, better colors)
+□ HTML is semantic and accessible
+□ JavaScript uses modern syntax (ES6+)
+□ All forms and interactions still work
 
 ═══════════════════════════════════════════════════════════════════════════════
-NOW GENERATE THE COMPLETE FILE STREAM
+NOW GENERATE ALL {total_files} FILES
 ═══════════════════════════════════════════════════════════════════════════════
 
 Output ALL files now in XML format.
-- PRESERVE all existing backend logic and database connections
-- MODERNIZE only the UI/UX layer  
-- Include EVERY required file with COMPLETE content
-- Do not use placeholders
+Use ORIGINAL file paths.
+PRESERVE all functionality.
+ENHANCE only the appearance/style.
+Include EVERY file with COMPLETE content.
 """
