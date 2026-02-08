@@ -742,6 +742,7 @@ This PR contains the **completely modernized** version of your legacy codebase.
             can_modernize = deep_scan_result.get("can_modernize", [])
             api_endpoints = deep_scan_result.get("api_endpoints", [])
             files = deep_scan_result.get("files", [])
+            file_count = len(files)
             
             # Create file contents summary
             files_content = ""
@@ -774,6 +775,7 @@ FULL FILE CONTENTS (USE THESE AS BASE):
 """
         else:
             preservation_context = "[DEEP SCAN NOT AVAILABLE - Using path-only mode]"
+            file_count = 0
         
         prompt = f"""
 ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -825,62 +827,71 @@ Analyze the existing codebase and list:
 4. Authentication method (KEEP SAME)
 5. Core business logic (KEEP SAME)
 
-PHASE 2: MODERNIZATION TARGETS
-Identify ONLY what can be safely modernized:
-1. UI Components - can be restyled, restructured
-2. CSS/Styling - can be modernized to Tailwind
-3. Frontend framework upgrades (React class → hooks, etc.)
-4. Performance optimizations (same output, faster execution)
-5. Code cleanup (better structure, same functionality)
+PHASE 2: ENHANCEMENT TARGETS (NOT REPLACEMENT!)
+Identify what can be ENHANCED IN-PLACE:
+1. HTML files - Add modern CSS classes, better structure (KEEP SAME FILES!)
+2. CSS files - Modernize styling (dark mode, better colors, animations)
+3. JavaScript - Convert var→const, add async/await (KEEP SAME FILES!)
+4. Server files - Add error handling, logging (KEEP ALL ENDPOINTS!)
+5. Performance - Optimize slow code (SAME OUTPUT!)
 
-PHASE 3: ENHANCED ARCHITECTURE
-Design the modernized version:
+⚠️ YOU ARE NOT CREATING A NEW FRAMEWORK! ⚠️
+- If original uses HTML files → KEEP HTML files (modernize them!)
+- If original uses Vue.js → KEEP Vue.js (enhance it!)
+- If original uses Express → KEEP Express (optimize it!)
+- DO NOT replace HTML with React/Next.js
+- DO NOT create a new folder structure
 
-**Backend (MINIMAL CHANGES)**:
-- KEEP: Same framework (or compatible upgrade like Flask → FastAPI with same routes)
+PHASE 3: IN-PLACE ENHANCEMENT PLAN
+
+**Backend (Express.js - PRESERVE COMPLETELY)**:
+- KEEP: Same framework (Express stays Express!)
 - KEEP: Same database and connection strings
-- KEEP: Same API endpoints (exact same paths and methods)
+- KEEP: ALL API endpoints (exact same paths and methods)
 - KEEP: Same authentication flow
-- ADD: Better error handling, logging (optional)
-- ADD: Health check endpoint at / (if not exists)
-- ADD: CORS middleware for sandbox compatibility
+- KEEP: Same file structure
+- ADD: Better error handling, logging
+- ADD: CORS middleware
 
-**Frontend (CAN MODERNIZE)**:
-- UPGRADE: To Next.js 15 with modern patterns
-- RESTYLE: Using Tailwind CSS with custom design system
-- PRESERVE: All existing pages and their functionality
-- PRESERVE: All API calls (same endpoints)
-- ENHANCE: UI/UX with modern design patterns
+**Frontend (ENHANCE EXISTING FILES, NOT REPLACE)**:
+- KEEP: All original HTML/CSS/JS files
+- KEEP: Same file paths and structure
+- ENHANCE: Add modern CSS to existing HTML
+- ENHANCE: Add responsive design
+- ENHANCE: Improve JavaScript (ES6+)
+- DO NOT: Create new React/Next.js/Vue files
 
 PHASE 4: OUTPUT REQUIREMENTS
 
 Your plan MUST include:
 
 1. **PRESERVATION CHECKLIST**:
-   - [ ] All existing API endpoints preserved: [list them]
-   - [ ] Database type unchanged: [type]
-   - [ ] Data schemas unchanged: [list key schemas]
-   - [ ] Authentication method unchanged: [method]
+   - [ ] All {file_count} original files will be output
+   - [ ] All existing API endpoints preserved
+   - [ ] Database type unchanged
+   - [ ] Same file paths used
 
-2. **BACKEND PLAN**:
-   - Framework: [SAME as original OR compatible upgrade]
-   - Database: [SAME - include connection string pattern]
-   - Endpoints to copy: [list ALL from original]
-   - New additions: [only new helper endpoints]
+2. **BACKEND ENHANCEMENT**:
+   - Files to enhance: [list ALL server files from original]
+   - Endpoints to preserve: [list ALL - no exceptions!]
+   - Additions: [only logging, error handling if missing]
 
-3. **FRONTEND PLAN**:
-   - Pages to recreate: [list all pages from original]
-   - Components to modernize: [list components]
-   - Design system: [colors, typography based on preferences]
-   - API integration: [same endpoints as original]
+3. **FRONTEND ENHANCEMENT**:
+   - HTML files to enhance: [list ALL HTML files from original]
+   - CSS changes: [describe modern styling to add]
+   - JavaScript improvements: [list syntax upgrades]
 
-4. **FILE STRUCTURE**:
-   List all files to generate, marking which are:
-   - [PRESERVE] - Copy logic from original
-   - [MODERNIZE] - Same function, new UI
-   - [NEW] - Added functionality
+4. **FILE OUTPUT**:
+   List ALL files you will output:
+   - [PRESERVE] - Original path, enhanced content
+   
+   Example:
+   - [PRESERVE] Home/Home/admin.html
+   - [PRESERVE] Home/Home/adminserver.js
+   - [PRESERVE] Home/Home/styles.css
 
-CRITICAL: Return an immediately implementable plan. Do not ask questions.
+⚠️ CRITICAL: You must output ALL {file_count} original files!
+
 Output format: Plain text architectural plan with clear sections.
 """
         # Use Gemini 3 Pro for complex reasoning
@@ -1177,13 +1188,13 @@ Output format: Plain text architectural plan with clear sections.
                         else:
                             # No package.json in server dir - install common packages there
                             print(f"[*] No package.json in {entrypoint_dir}, installing common packages...")
-                            self.sandbox.commands.run(f"cd {entrypoint_dir} && npm init -y && npm install express mongoose cors dotenv bcrypt multer", timeout=180)
+                            self.sandbox.commands.run(f"cd {entrypoint_dir} && npm init -y && npm install express mongoose cors dotenv bcrypt multer node-fetch xlsx", timeout=180)
                 else:
                     # No package.json anywhere, install common packages in entrypoint directory
                     print("[*] No package.json found, installing common packages...")
                     package_dir = entrypoint_dir
                     self.sandbox.commands.run(f"cd {entrypoint_dir} && npm init -y", timeout=30)
-                    self.sandbox.commands.run(f"cd {entrypoint_dir} && npm install express mongoose cors dotenv bcrypt multer", timeout=180)
+                    self.sandbox.commands.run(f"cd {entrypoint_dir} && npm install express mongoose cors dotenv bcrypt multer node-fetch xlsx", timeout=180)
                 
                 # START NODE SERVER IN BACKGROUND
                 print(f"[*] Starting Node.js Server: {entrypoint} (logging to app.log)...")
