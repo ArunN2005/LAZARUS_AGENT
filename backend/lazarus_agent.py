@@ -159,6 +159,196 @@ class LazarusEngine:
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
+    def commit_all_files_to_github(self, repo_url: str, files: list) -> dict:
+        """
+        Commits ALL files to a 'lazarus-resurrection' branch and creates a PR.
+        files: list of {"filename": str, "content": str}
+        """
+        if not self.github_token:
+            return {"status": "error", "message": "GITHUB_TOKEN is missing."}
+
+        try:
+            import base64
+            
+            # Parse owner/repo
+            match = re.search(r"github\.com/([^/]+)/([^/.]+)", repo_url)
+            if not match:
+                return {"status": "error", "message": "Invalid GitHub URL."}
+            
+            owner, repo_name = match.groups()
+            base_api = f"https://api.github.com/repos/{owner}/{repo_name}"
+            headers = {
+                "Authorization": f"token {self.github_token}",
+                "Accept": "application/vnd.github.v3+json"
+            }
+            target_branch = "lazarus-resurrection"
+
+            print(f"[*] Creating PR for {len(files)} files...")
+
+            # 1. Get the base branch (try main, then master)
+            base_branch = "main"
+            main_resp = requests.get(f"{base_api}/git/ref/heads/main", headers=headers)
+            if main_resp.status_code != 200:
+                main_resp = requests.get(f"{base_api}/git/ref/heads/master", headers=headers)
+                base_branch = "master"
+                if main_resp.status_code != 200:
+                    return {"status": "error", "message": "Could not find main or master branch."}
+            
+            base_sha = main_resp.json()['object']['sha']
+
+            # 2. Create or update the target branch
+            branch_resp = requests.get(f"{base_api}/git/ref/heads/{target_branch}", headers=headers)
+            
+            if branch_resp.status_code == 404:
+                print(f"[*] Creating branch '{target_branch}'...")
+                create_resp = requests.post(
+                    f"{base_api}/git/refs",
+                    headers=headers,
+                    json={"ref": f"refs/heads/{target_branch}", "sha": base_sha}
+                )
+                if create_resp.status_code != 201:
+                    return {"status": "error", "message": f"Failed to create branch: {create_resp.text}"}
+            else:
+                # Update existing branch to latest base
+                print(f"[*] Updating branch '{target_branch}'...")
+                requests.patch(
+                    f"{base_api}/git/refs/heads/{target_branch}",
+                    headers=headers,
+                    json={"sha": base_sha, "force": True}
+                )
+
+            # 3. Get the base tree
+            base_commit_resp = requests.get(f"{base_api}/git/commits/{base_sha}", headers=headers)
+            base_tree_sha = base_commit_resp.json()['tree']['sha']
+
+            # 4. Create blobs for each file
+            tree_items = []
+            for f in files:
+                content_bytes = f['content'].encode('utf-8')
+                base64_content = base64.b64encode(content_bytes).decode('utf-8')
+                
+                blob_resp = requests.post(
+                    f"{base_api}/git/blobs",
+                    headers=headers,
+                    json={"content": base64_content, "encoding": "base64"}
+                )
+                
+                if blob_resp.status_code == 201:
+                    blob_sha = blob_resp.json()['sha']
+                    tree_items.append({
+                        "path": f['filename'],
+                        "mode": "100644",
+                        "type": "blob",
+                        "sha": blob_sha
+                    })
+                    print(f"  [+] Staged: {f['filename']}")
+                else:
+                    print(f"  [!] Failed to create blob for {f['filename']}")
+
+            if not tree_items:
+                return {"status": "error", "message": "No files were staged."}
+
+            # 5. Create a new tree
+            tree_resp = requests.post(
+                f"{base_api}/git/trees",
+                headers=headers,
+                json={"base_tree": base_tree_sha, "tree": tree_items}
+            )
+            
+            if tree_resp.status_code != 201:
+                return {"status": "error", "message": f"Failed to create tree: {tree_resp.text}"}
+            
+            new_tree_sha = tree_resp.json()['sha']
+
+            # 6. Create a commit
+            commit_resp = requests.post(
+                f"{base_api}/git/commits",
+                headers=headers,
+                json={
+                    "message": f"🧬 Lazarus Resurrection: Modernized {len(files)} files",
+                    "tree": new_tree_sha,
+                    "parents": [base_sha]
+                }
+            )
+            
+            if commit_resp.status_code != 201:
+                return {"status": "error", "message": f"Failed to create commit: {commit_resp.text}"}
+            
+            new_commit_sha = commit_resp.json()['sha']
+            print(f"[*] Created commit: {new_commit_sha[:7]}")
+
+            # 7. Update the branch reference
+            update_resp = requests.patch(
+                f"{base_api}/git/refs/heads/{target_branch}",
+                headers=headers,
+                json={"sha": new_commit_sha}
+            )
+            
+            if update_resp.status_code != 200:
+                return {"status": "error", "message": f"Failed to update branch: {update_resp.text}"}
+
+            # 8. Check if PR already exists
+            pr_check_resp = requests.get(
+                f"{base_api}/pulls",
+                headers=headers,
+                params={"head": f"{owner}:{target_branch}", "base": base_branch, "state": "open"}
+            )
+            
+            if pr_check_resp.status_code == 200 and len(pr_check_resp.json()) > 0:
+                existing_pr = pr_check_resp.json()[0]
+                return {
+                    "status": "success", 
+                    "pr_url": existing_pr['html_url'],
+                    "message": f"Pull Request updated with {len(files)} files. Check it on GitHub!"
+                }
+
+            # 9. Create new PR
+            pr_data = {
+                "title": "🧬 Lazarus Resurrection - Modernized Codebase",
+                "body": f"""## 🦾 Automated Resurrection by Lazarus Engine
+
+This PR contains the **completely modernized** version of your legacy codebase.
+
+### 📁 Files Changed ({len(files)} files)
+{chr(10).join([f"- `{f['filename']}`" for f in files[:20]])}
+{"..." if len(files) > 20 else ""}
+
+### ✨ What's Included
+- ✅ Modern FastAPI backend with CORS and validation
+- ✅ Next.js 15 frontend with Tailwind CSS
+- ✅ Production-ready code with error handling
+- ✅ Docker Compose for deployment  
+- ✅ TypeScript types and Pydantic models
+
+---
+*Generated by [Lazarus Engine](https://github.com/ArunN2005/lazarus-hackathon) 🧬*""",
+                "head": target_branch,
+                "base": base_branch
+            }
+            
+            pr_resp = requests.post(f"{base_api}/pulls", headers=headers, json=pr_data)
+            
+            if pr_resp.status_code == 201:
+                pr_url = pr_resp.json()['html_url']
+                pr_number = pr_resp.json()['number']
+                print(f"[*] Pull Request #{pr_number} created!")
+                return {
+                    "status": "success", 
+                    "pr_url": pr_url,
+                    "message": f"Pull Request #{pr_number} created with {len(files)} files!"
+                }
+            else:
+                compare_url = f"https://github.com/{owner}/{repo_name}/compare/{base_branch}...{target_branch}?expand=1"
+                return {
+                    "status": "success", 
+                    "pr_url": compare_url,
+                    "message": f"Files committed. Create PR manually: {pr_resp.text[:100]}"
+                }
+
+        except Exception as e:
+            print(f"[!] PR Creation Error: {str(e)}")
+            return {"status": "error", "message": str(e)}
+
     def scan_repository(self, repo_url: str) -> list:
         """ Fetches the file tree of the remote repository using GitHub API. """
         try:
@@ -764,3 +954,7 @@ def process_resurrection(repo_url, instructions):
 
 def commit_code(repo_url, filename, content):
     return engine.commit_to_github(repo_url, filename, content)
+
+def commit_all_files(repo_url, files):
+    """Commits ALL files and creates a PR in one action."""
+    return engine.commit_all_files_to_github(repo_url, files)

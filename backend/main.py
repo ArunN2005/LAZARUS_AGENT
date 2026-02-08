@@ -65,6 +65,42 @@ class LazarusHandler(BaseHTTPRequestHandler):
 
             except Exception as e:
                 self.send_error(500, str(e))
+        
+        elif self.path == '/api/create-pr':
+            try:
+                from lazarus_agent import commit_all_files
+                
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                request_json = json.loads(post_data)
+                
+                repo_url = request_json.get('repo_url')
+                files = request_json.get('files')  # list of {"filename": str, "content": str}
+                
+                if not files or not repo_url:
+                    self.send_response(400)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"status": "error", "message": "Missing repo_url or files"}).encode())
+                    return
+
+                # Commit all files and create PR
+                result = commit_all_files(repo_url, files)
+                
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps(result).encode())
+
+            except Exception as e:
+                self.send_response(500)
+                self.send_header('Content-type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "error", "message": str(e)}).encode())
+        
         else:
             self.send_response(404)
             self.end_headers()
