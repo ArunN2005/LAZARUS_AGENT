@@ -233,6 +233,66 @@ CREATE OR ENHANCE a modern CSS file with:
 - Responsive breakpoints
 
 ═══════════════════════════════════════════════════════════════════════════════
+SECTION 6: PERFORMANCE OPTIMIZATION (STRICT OUTPUT PRESERVATION)
+═══════════════════════════════════════════════════════════════════════════════
+
+You MAY optimize slow code for better performance, BUT:
+
+🔴 THE GOLDEN RULE: OUTPUT MUST REMAIN IDENTICAL!
+If a function returns [1, 2, 3] before optimization, it MUST return [1, 2, 3] after.
+
+ALLOWED OPTIMIZATIONS:
+✅ Replace nested loops with single-pass algorithms
+✅ Add caching for repeated expensive operations
+✅ Use Map/Set instead of arrays for lookups
+✅ Replace synchronous I/O with async where safe
+✅ Batch database queries instead of N+1 queries
+✅ Use pagination for large data fetches
+✅ Add indexes hint in comments for databases
+✅ Replace string concatenation with template literals
+✅ Use array methods (map, filter, reduce) instead of for loops
+
+NOT ALLOWED:
+❌ Changing what data is returned
+❌ Changing the order of returned data (unless explicitly unordered)
+❌ Removing any functionality
+❌ Changing API response structure
+❌ Changing database schema
+
+EXAMPLE - Before (Slow):
+```javascript
+// O(n²) - Slow for large arrays
+function findDuplicates(arr) {{
+  const duplicates = [];
+  for (let i = 0; i < arr.length; i++) {{
+    for (let j = i + 1; j < arr.length; j++) {{
+      if (arr[i] === arr[j] && !duplicates.includes(arr[i])) {{
+        duplicates.push(arr[i]);
+      }}
+    }}
+  }}
+  return duplicates;
+}}
+```
+
+EXAMPLE - After (Optimized, SAME OUTPUT):
+```javascript
+// O(n) - Optimized with Set
+function findDuplicates(arr) {{
+  const seen = new Set();
+  const duplicates = new Set();
+  for (const item of arr) {{
+    if (seen.has(item)) {{
+      duplicates.add(item);
+    }} else {{
+      seen.add(item);
+    }}
+  }}
+  return [...duplicates]; // SAME OUTPUT as before!
+}}
+```
+
+═══════════════════════════════════════════════════════════════════════════════
 FINAL VERIFICATION BEFORE OUTPUT:
 ═══════════════════════════════════════════════════════════════════════════════
 
@@ -243,6 +303,7 @@ Before generating output, verify:
 □ Every file uses its ORIGINAL path
 □ No functionality has been removed
 □ Only styling/appearance has been changed
+□ Optimizations preserve exact output behavior
 
 ═══════════════════════════════════════════════════════════════════════════════
 NOW GENERATE ALL {total_files} ENHANCED FILES
