@@ -1,0 +1,26 @@
+{
+  "repo_url": "https://github.com/kirankishoreV-07/vsyk",
+  "repo_id": "2a8928a45f19dacd",
+  "created_at": "2026-02-09T10:03:53.656323",
+  "last_resurrection": "2026-02-09T10:04:40.194158",
+  "total_attempts": 2,
+  "successful_attempts": 0,
+  "failed_attempts": 0,
+  "tech_stack": {
+    "detected_backend": "Express.js",
+    "detected_frontend": "React",
+    "detected_database": "MongoDB",
+    "preferred_modernization": null
+  },
+  "decisions": [],
+  "failures": [],
+  "dependency_issues": [],
+  "successful_patterns": [],
+  "user_preferences": {
+    "keep_original_paths": true,
+    "preferred_css_framework": null,
+    "preferred_frontend_framework": null,
+    "avoid_frameworks": []
+  },
+  "resurrection_history": []
+}

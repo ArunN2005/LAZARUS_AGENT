@@ -1652,6 +1652,11 @@ except Exception as e:
         must_preserve = deep_scan_result.get("must_preserve", [])
         files_analyzed = len(deep_scan_result.get("files", []))
         
+        # Send repo file list to frontend for VS Code-style tree view
+        repo_file_paths = [f["path"] for f in deep_scan_result.get("files", []) if "path" in f]
+        if repo_file_paths:
+            yield {"type": "repo_files", "files": repo_file_paths}
+        
         # Update memory with tech stack
         record_attempt_start(repo_url, tech_stack)
         
