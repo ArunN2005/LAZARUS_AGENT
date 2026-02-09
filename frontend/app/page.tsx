@@ -5,7 +5,7 @@ import {
   Play, GitPullRequest, CheckCircle, Cpu, ShieldAlert,
   FolderTree, Terminal as TerminalIcon, Eye,
   Loader2, AlertCircle, Search, ArrowRight, Zap,
-  BarChart3,
+  BarChart3, Bug,
 } from 'lucide-react';
 import FileTree, { FileEntry } from './components/FileTree';
 import SyntaxHighlighter from './components/SyntaxHighlighter';
@@ -13,10 +13,29 @@ import Logo3D from './components/Logo3D';
 import AnalysisPanel from './components/AnalysisPanel';
 import PlanningPanel from './components/PlanningPanel';
 import ReviewPanel from './components/ReviewPanel';
+import DebugPanel from './components/DebugPanel';
 
 type Artifact = { filename: string; content: string };
 
 type Phase = 'logo' | 'input' | 'analyzing' | 'analysis' | 'planning' | 'building' | 'results';
+
+// ── Debug Toggle Button (fixed position) ────────────────────────────
+function DebugToggleButton({ showDebug, onToggle }: { showDebug: boolean; onToggle: () => void }) {
+  if (showDebug) return null; // Hidden when panel is open
+  return (
+    <button
+      onClick={onToggle}
+      className="fixed bottom-4 right-4 z-40 flex items-center gap-2 px-3 py-2 rounded-lg text-[11px] font-mono tracking-wider
+        bg-[#1a1a1a]/90 border border-[#f0883e]/30 text-[#f0883e] backdrop-blur-sm
+        hover:bg-[#f0883e]/10 hover:border-[#f0883e]/60 hover:shadow-[0_0_20px_rgba(240,136,62,0.15)]
+        transition-all duration-200 group"
+      title="Toggle Debug Developer Logs"
+    >
+      <Bug className="w-4 h-4 group-hover:animate-pulse" />
+      <span className="hidden sm:inline">DEBUG LOGS</span>
+    </button>
+  );
+}
 
 export default function Home() {
   // ── Phase control ──────────────────────────────────────────────
@@ -55,6 +74,9 @@ export default function Home() {
   const [buildRetryCount, setBuildRetryCount] = useState(0);
   const [buildErrors, setBuildErrors] = useState<{ attempt: number; type: string; message: string }[]>([]);
   const [iterationCount, setIterationCount] = useState(0);
+
+  // ── Debug panel state ──────────────────────────────────────────
+  const [showDebug, setShowDebug] = useState(false);
 
   useEffect(() => { document.documentElement.classList.add('dark'); }, []);
 
@@ -303,7 +325,14 @@ export default function Home() {
   // PHASE 1: LOGO ANIMATION
   // ══════════════════════════════════════════════════════════════
   if (phase === 'logo') {
-    return <Logo3D onComplete={() => setPhase('input')} />;
+    return (
+      <>
+        <Logo3D onComplete={() => setPhase('input')} />
+        {/* Debug toggle - always available */}
+        <DebugToggleButton showDebug={showDebug} onToggle={() => setShowDebug(v => !v)} />
+        <DebugPanel isOpen={showDebug} onToggle={() => setShowDebug(false)} />
+      </>
+    );
   }
 
   // ══════════════════════════════════════════════════════════════
@@ -380,6 +409,10 @@ export default function Home() {
             ))}
           </div>
         </div>
+
+        {/* Debug toggle */}
+        <DebugToggleButton showDebug={showDebug} onToggle={() => setShowDebug(v => !v)} />
+        <DebugPanel isOpen={showDebug} onToggle={() => setShowDebug(false)} />
       </div>
     );
   }
@@ -433,6 +466,10 @@ export default function Home() {
             )}
           </div>
         </div>
+
+        {/* Debug toggle */}
+        <DebugToggleButton showDebug={showDebug} onToggle={() => setShowDebug(v => !v)} />
+        <DebugPanel isOpen={showDebug} onToggle={() => setShowDebug(false)} />
       </div>
     );
   }
@@ -457,6 +494,9 @@ export default function Home() {
           analysis={analysisData}
           onProceed={() => setPhase('planning')}
         />
+        {/* Debug toggle */}
+        <DebugToggleButton showDebug={showDebug} onToggle={() => setShowDebug(v => !v)} />
+        <DebugPanel isOpen={showDebug} onToggle={() => setShowDebug(false)} />
       </div>
     );
   }
@@ -483,6 +523,9 @@ export default function Home() {
           onStartBuild={startBuild}
           onBack={() => setPhase('analysis')}
         />
+        {/* Debug toggle */}
+        <DebugToggleButton showDebug={showDebug} onToggle={() => setShowDebug(v => !v)} />
+        <DebugPanel isOpen={showDebug} onToggle={() => setShowDebug(false)} />
       </div>
     );
   }
@@ -705,6 +748,10 @@ export default function Home() {
           </div>
         </div>
       </div>
+
+      {/* Debug toggle */}
+      <DebugToggleButton showDebug={showDebug} onToggle={() => setShowDebug(v => !v)} />
+      <DebugPanel isOpen={showDebug} onToggle={() => setShowDebug(false)} />
     </div>
   );
 }

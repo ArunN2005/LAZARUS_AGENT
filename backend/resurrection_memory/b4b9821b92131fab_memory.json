@@ -2,9 +2,9 @@
   "repo_url": "https://github.com/ArunN2005/demo-repo",
   "repo_id": "b4b9821b92131fab",
   "created_at": "2026-02-09T11:30:34.803631",
-  "last_resurrection": "2026-02-09T13:32:56.540957",
-  "total_attempts": 8,
-  "successful_attempts": 0,
+  "last_resurrection": "2026-02-09T19:01:20.646986",
+  "total_attempts": 28,
+  "successful_attempts": 8,
   "failed_attempts": 1,
   "tech_stack": {
     "detected_backend": "Flask",
@@ -12,7 +12,48 @@
     "detected_database": null,
     "preferred_modernization": null
   },
-  "decisions": [],
+  "decisions": [
+    {
+      "timestamp": "2026-02-09T15:58:25.380493",
+      "decision": "Resurrection completed successfully",
+      "outcome": "success"
+    },
+    {
+      "timestamp": "2026-02-09T15:58:58.152498",
+      "decision": "Resurrection completed successfully",
+      "outcome": "success"
+    },
+    {
+      "timestamp": "2026-02-09T16:15:10.051593",
+      "decision": "Resurrection completed successfully",
+      "outcome": "success"
+    },
+    {
+      "timestamp": "2026-02-09T16:24:48.694405",
+      "decision": "Resurrection completed successfully",
+      "outcome": "success"
+    },
+    {
+      "timestamp": "2026-02-09T17:05:30.422981",
+      "decision": "Resurrection completed successfully",
+      "outcome": "success"
+    },
+    {
+      "timestamp": "2026-02-09T17:22:14.586060",
+      "decision": "Resurrection completed successfully",
+      "outcome": "success"
+    },
+    {
+      "timestamp": "2026-02-09T18:31:50.760927",
+      "decision": "Resurrection completed successfully",
+      "outcome": "success"
+    },
+    {
+      "timestamp": "2026-02-09T19:02:34.050149",
+      "decision": "Resurrection completed successfully",
+      "outcome": "success"
+    }
+  ],
   "failures": [
     {
       "timestamp": "2026-02-09T11:51:00.641878",
@@ -23,12 +64,74 @@
     }
   ],
   "dependency_issues": [],
-  "successful_patterns": [],
+  "successful_patterns": [
+    "Runtime: unknown",
+    "Entrypoint: error.log",
+    "Runtime: python",
+    "Entrypoint: backend/api.py"
+  ],
   "user_preferences": {
     "keep_original_paths": true,
     "preferred_css_framework": null,
     "preferred_frontend_framework": null,
     "avoid_frameworks": []
   },
-  "resurrection_history": []
+  "resurrection_history": [
+    {
+      "timestamp": "2026-02-09T15:58:25.380493",
+      "outcome": "success",
+      "decisions": [
+        "Resurrection completed successfully"
+      ]
+    },
+    {
+      "timestamp": "2026-02-09T15:58:58.152498",
+      "outcome": "success",
+      "decisions": [
+        "Resurrection completed successfully"
+      ]
+    },
+    {
+      "timestamp": "2026-02-09T16:15:10.051593",
+      "outcome": "success",
+      "decisions": [
+        "Resurrection completed successfully"
+      ]
+    },
+    {
+      "timestamp": "2026-02-09T16:24:48.694405",
+      "outcome": "success",
+      "decisions": [
+        "Resurrection completed successfully"
+      ]
+    },
+    {
+      "timestamp": "2026-02-09T17:05:30.422981",
+      "outcome": "success",
+      "decisions": [
+        "Resurrection completed successfully"
+      ]
+    },
+    {
+      "timestamp": "2026-02-09T17:22:14.586060",
+      "outcome": "success",
+      "decisions": [
+        "Resurrection completed successfully"
+      ]
+    },
+    {
+      "timestamp": "2026-02-09T18:31:50.760927",
+      "outcome": "success",
+      "decisions": [
+        "Resurrection completed successfully"
+      ]
+    },
+    {
+      "timestamp": "2026-02-09T19:02:34.050149",
+      "outcome": "success",
+      "decisions": [
+        "Resurrection completed successfully"
+      ]
+    }
+  ]
 }

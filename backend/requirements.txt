@@ -1,6 +1,6 @@
 fastapi
 uvicorn
-google-generativeai
+google-generative-ai
 e2b-code-interpreter
 python-dotenv
 requests

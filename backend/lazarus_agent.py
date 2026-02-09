@@ -4,13 +4,40 @@ import re
 import requests
 import time
 import ast
+import logging
+import traceback as tb_module
 from simple_env import load_env
-from prompts import get_code_generation_prompt
+from prompts import (
+    get_code_generation_prompt,
+    get_lightweight_plan_prompt,
+    get_batch_code_generation_prompt,
+    extract_batch_summary,
+)
 from resurrection_memory import (
     load_memory, record_attempt_start, record_failure, 
     record_success, record_dependency_issue, record_decision,
     get_memory_context_for_prompt, get_memory_summary
 )
+
+
+class GeminiAPIError(Exception):
+    """Raised when all Gemini API models fail after retries."""
+    def __init__(self, message, models_tried=None, last_status=None):
+        super().__init__(message)
+        self.models_tried = models_tried or []
+        self.last_status = last_status
+
+# Setup logger for lazarus_agent module
+logger = logging.getLogger('lazarus.agent')
+
+# Debug log bridge - imports from main.py at runtime to avoid circular imports
+def _add_debug_log(level, category, message, details=None):
+    """Add debug log entry - bridges to main.py's buffer."""
+    try:
+        from main import add_debug_log
+        add_debug_log(level, category, message, details)
+    except ImportError:
+        pass  # Running standalone, skip
 
 # Try to import E2B, handle failure
 try:
@@ -73,17 +100,40 @@ def sanitize_path(path: str) -> str:
     return result
 
 class LazarusEngine:
+    # ═══════════════════════════════════════════════════════════
+    # MODEL CONTEXT WINDOWS (Dynamic Batch Sizing)
+    # ═══════════════════════════════════════════════════════════
+    MODEL_CONTEXT_LIMITS = {
+        # Model Name: (tokens, safe_chars_for_code, description)
+        "gemini-3-flash-preview": (1_048_576, 700_000, "1M tokens - Gemini 3 Flash (PRIMARY)"),
+        "gemini-3-pro-preview": (2_097_152, 1_400_000, "1M tokens - Gemini 3 Pro (flagship)"),
+        "gemini-2.0-flash-exp": (1_048_576, 600_000, "1M tokens - Experimental Flash"),
+        "gemini-2.0-flash": (1_048_576, 600_000, "1M tokens - Stable Flash (fallback)"),
+        "gemini-1.5-flash": (1_048_576, 600_000, "1M tokens - Legacy Flash"),
+        "gemini-1.5-pro": (2_097_152, 1_400_000, "2M tokens - Legacy Pro"),
+    }
+    
     def __init__(self):
         self.api_key = GEMINI_API_KEY
         self.github_token = os.getenv("GITHUB_TOKEN")
-        # Fallback to 2.0 Flash if 3.0 Pro is unstable/unavailable
-        # Gemini 3 Architecture
-        self.planner_model = "gemini-3-flash-preview"
-        self.coder_model = "gemini-3-pro-preview" 
+        # ── Model Selection (Gemini 3 Series - Confirmed Working) ──
+        # gemini-3-flash-preview: Latest Flash - Best cost/performance ✨
+        # gemini-2.0-flash:       Stable fallback - 2K RPM
+        # gemini-1.5-flash:       Legacy fallback - High availability
+        self.planner_model = "gemini-2.0-flash"              # Fast planning (2K RPM)
+        self.coder_model = "gemini-3-flash-preview"          # PRIMARY: Gemini 3 Flash ✅
         self.base_url = "https://generativelanguage.googleapis.com/v1beta/models"
         
         # E2B Persistence
         self.sandbox = None
+    
+    def get_model_max_chars(self, model_name: str = None) -> int:
+        """Get safe character limit for a model (defaults to coder model)."""
+        model = model_name or self.coder_model
+        if model in self.MODEL_CONTEXT_LIMITS:
+            return self.MODEL_CONTEXT_LIMITS[model][1]  # safe_chars
+        # Fallback for unknown models
+        return 400_000  # Conservative default
 
     def commit_to_github(self, repo_url: str, filename: str, content: str) -> dict:
         """
@@ -421,11 +471,16 @@ This PR contains the **completely modernized** version of your legacy codebase.
             for branch in branches:
                 api_url = f"https://api.github.com/repos/{owner}/{repo_name}/git/trees/{branch}?recursive=1"
                 
-                resp = requests.get(api_url, headers=headers)
+                resp = requests.get(api_url, headers=headers, timeout=30)
                 if resp.status_code == 200:
-                    tree = resp.json().get('tree', [])
-                    # Return list of paths
-                    return [item['path'] for item in tree if item['type'] == 'blob']
+                    resp_json = resp.json()
+                    tree = resp_json.get('tree', [])
+                    if resp_json.get('truncated'):
+                        print(f"[!] Warning: Repository tree was truncated by GitHub API")
+                    # Return list of paths (filter out directories)
+                    paths = [item['path'] for item in tree if item['type'] == 'blob']
+                    print(f"[*] Scan found {len(paths)} files on branch '{branch}'")
+                    return paths
             
             # If both branches failed, try to get default branch from repo info
             repo_api_url = f"https://api.github.com/repos/{owner}/{repo_name}"
@@ -491,27 +546,69 @@ This PR contains the **completely modernized** version of your legacy codebase.
             
             # Get file tree
             tree_url = f"https://api.github.com/repos/{owner}/{repo_name}/git/trees/{default_branch}?recursive=1"
-            tree_resp = requests.get(tree_url, headers=headers)
+            tree_resp = requests.get(tree_url, headers=headers, timeout=30)
             
             if tree_resp.status_code != 200:
                 print(f"[!] Failed to get repository tree: {tree_resp.status_code}")
+                _add_debug_log('ERROR', 'DEEP_SCAN', f'Tree API failed: HTTP {tree_resp.status_code}', {
+                    'response': tree_resp.text[:300]
+                })
                 return result
             
-            tree = tree_resp.json().get('tree', [])
+            tree_json = tree_resp.json()
+            tree = tree_json.get('tree', [])
             
-            # File extensions to fetch content for
+            if tree_json.get('truncated'):
+                print(f"[!] ⚠️ Tree was truncated by GitHub! Some files may be missing.")
+                _add_debug_log('WARNING', 'DEEP_SCAN', 'GitHub tree API returned truncated results', {})
+            
+            total_items = len(tree)
+            blob_items = [item for item in tree if item['type'] == 'blob']
+            print(f"[*] Repository tree: {total_items} items total, {len(blob_items)} files (blobs)")
+            
+            # File extensions to fetch content for (COMPREHENSIVE)
             code_extensions = {
-                '.py', '.js', '.ts', '.tsx', '.jsx', '.json', '.yaml', '.yml',
-                '.html', '.css', '.scss', '.md', '.txt', '.env', '.env.example',
-                '.toml', '.cfg', '.ini', '.sql', '.prisma', '.graphql'
+                # Languages
+                '.py', '.js', '.ts', '.tsx', '.jsx', '.mjs', '.cjs',
+                '.rb', '.go', '.rs', '.java', '.php', '.c', '.cpp', '.h', '.cs',
+                '.swift', '.kt', '.dart', '.lua', '.r', '.pl', '.sh', '.bat', '.ps1',
+                # Web
+                '.html', '.htm', '.css', '.scss', '.sass', '.less', '.styl',
+                '.vue', '.svelte', '.ejs', '.pug', '.hbs', '.handlebars', '.mustache',
+                '.astro', '.mdx',
+                # Config & Data
+                '.json', '.yaml', '.yml', '.toml', '.cfg', '.ini', '.xml',
+                '.env', '.env.example', '.env.local', '.env.development', '.env.production',
+                '.conf', '.properties', '.editorconfig',
+                # DB & API
+                '.sql', '.prisma', '.graphql', '.gql', '.proto',
+                # Docs & Text
+                '.md', '.txt', '.rst', '.csv',
+                # Build & Package
+                '.lock', '.npmrc', '.nvmrc', '.babelrc',
+                # Docker
+                '.dockerfile',
+                # SVG (used in components)
+                '.svg',
             }
             
-            # Files to always fetch
+            # Files to always fetch (by exact name)
             important_files = {
-                'package.json', 'requirements.txt', 'Pipfile', 'pyproject.toml',
+                'package.json', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml',
+                'requirements.txt', 'Pipfile', 'Pipfile.lock', 'pyproject.toml', 'setup.py', 'setup.cfg',
                 'docker-compose.yml', 'docker-compose.yaml', 'Dockerfile',
-                '.env', '.env.example', '.env.local', 'config.py', 'settings.py',
-                'schema.prisma', 'models.py', 'schemas.py', 'database.py'
+                '.env', '.env.example', '.env.local', '.env.development',
+                'config.py', 'settings.py', 'config.js', 'config.ts',
+                'schema.prisma', 'models.py', 'schemas.py', 'database.py',
+                'tsconfig.json', 'jsconfig.json', 'next.config.js', 'next.config.mjs', 'next.config.ts',
+                'vite.config.js', 'vite.config.ts', 'webpack.config.js',
+                'tailwind.config.js', 'tailwind.config.ts', 'postcss.config.js', 'postcss.config.mjs',
+                'eslint.config.js', 'eslint.config.mjs', '.eslintrc.js', '.eslintrc.json',
+                '.prettierrc', '.prettierrc.json', '.prettierrc.js',
+                'Makefile', 'Procfile', 'Gemfile', 'Gemfile.lock',
+                '.gitignore', '.dockerignore', 'vercel.json', 'netlify.toml',
+                'babel.config.js', 'jest.config.js', 'jest.config.ts',
+                'vitest.config.ts', 'playwright.config.ts',
             }
             
             print(f"[*] Deep scanning {len(tree)} files in repository...")
@@ -537,40 +634,69 @@ This PR contains the **completely modernized** version of your legacy codebase.
                     'controller' in path.lower()
                 )
                 
-                # Skip node_modules, venv, etc.
-                skip_dirs = ['node_modules', 'venv', '.venv', '__pycache__', '.git', 'dist', 'build']
-                if any(skip_dir in path for skip_dir in skip_dirs):
+                # Skip dependency/build directories using PATH COMPONENT matching
+                # (NOT substring - 'dist' must not match 'distribution')
+                skip_dirs = {'node_modules', 'venv', '.venv', '__pycache__', '.git', 
+                             'dist', 'build', '.next', '.nuxt', 'coverage', '.cache',
+                             'vendor', 'bower_components', '.tox', 'egg-info', '.eggs'}
+                path_parts = set(path.replace('\\', '/').split('/'))
+                if path_parts & skip_dirs:  # Set intersection - only matches exact directory names
                     should_fetch = False
                 
-                if should_fetch:  # Fetch ALL files - no limit!
-                    try:
-                        # Fetch file content
-                        content_url = f"https://api.github.com/repos/{owner}/{repo_name}/contents/{path}?ref={default_branch}"
-                        content_resp = requests.get(content_url, headers=headers)
+                # Skip binary/media files by extension
+                binary_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.ico', '.bmp', '.webp',
+                                     '.mp3', '.mp4', '.wav', '.avi', '.mkv', '.mov',
+                                     '.zip', '.tar', '.gz', '.rar', '.7z',
+                                     '.pdf', '.doc', '.docx', '.xls', '.xlsx',
+                                     '.woff', '.woff2', '.ttf', '.eot', '.otf',
+                                     '.pyc', '.pyo', '.so', '.dll', '.exe', '.o',
+                                     '.DS_Store', '.map'}
+                if ext.lower() in binary_extensions:
+                    should_fetch = False
+                
+                # Skip files larger than 500KB (from tree metadata)
+                file_size = item.get('size', 0)
+                if file_size > 500_000:
+                    print(f"  [⚠] Skipping large file ({file_size:,} bytes): {path}")
+                    should_fetch = False
+                
+                if should_fetch:
+                    content = self._fetch_file_content(
+                        owner, repo_name, path, default_branch, headers, item.get('sha')
+                    )
+                    
+                    if content is not None:
+                        lang = self._detect_language(path, content)
                         
-                        if content_resp.status_code == 200:
-                            content_data = content_resp.json()
-                            if content_data.get('encoding') == 'base64':
-                                content = base64.b64decode(content_data['content']).decode('utf-8', errors='ignore')
-                                
-                                # Detect language
-                                lang = self._detect_language(path, content)
-                                
-                                result["files"].append({
-                                    "path": path,
-                                    "content": content,
-                                    "language": lang
-                                })
-                                
-                                # Analyze this file for tech stack
-                                self._analyze_file_for_tech_stack(path, content, result)
-                                
-                                files_fetched += 1
-                                print(f"  [+] Fetched: {path}")
-                    except Exception as e:
-                        print(f"  [!] Error fetching {path}: {e}")
+                        result["files"].append({
+                            "path": path,
+                            "content": content,
+                            "language": lang
+                        })
+                        
+                        # Analyze this file for tech stack
+                        self._analyze_file_for_tech_stack(path, content, result)
+                        
+                        files_fetched += 1
+                        print(f"  [+] Fetched ({files_fetched}): {path}")
+                    
+                    # GitHub API rate limit protection: pause every 30 files
+                    if files_fetched > 0 and files_fetched % 30 == 0:
+                        print(f"  [⏳] Rate limit pause after {files_fetched} files...")
+                        time.sleep(1)
             
-            print(f"[*] Deep scan complete: {files_fetched} files analyzed")
+            print(f"[*] Deep scan complete: {files_fetched}/{len([i for i in tree if i['type']=='blob'])} files analyzed")
+            
+            # Warn if we got suspiciously few files
+            total_blobs = len([i for i in tree if i['type'] == 'blob'])
+            if files_fetched == 0:
+                print(f"[!] WARNING: No files were fetched! Total blobs in tree: {total_blobs}")
+                _add_debug_log('ERROR', 'DEEP_SCAN', f'Zero files fetched from {total_blobs} blobs', {
+                    'repo_url': repo_url, 'tree_count': total_blobs
+                })
+            elif files_fetched < total_blobs * 0.3:  # Less than 30% of files
+                print(f"[!] WARNING: Only fetched {files_fetched}/{total_blobs} files ({100*files_fetched//total_blobs}%)")
+                _add_debug_log('WARNING', 'DEEP_SCAN', f'Low file fetch rate: {files_fetched}/{total_blobs}', {})
             
             # Summarize what must be preserved vs modernized
             self._categorize_preservation_targets(result)
@@ -581,15 +707,140 @@ This PR contains the **completely modernized** version of your legacy codebase.
             print(f"[!] Deep scan error: {str(e)}")
             return result
     
+    def _fetch_file_content(self, owner: str, repo_name: str, path: str, 
+                            branch: str, headers: dict, blob_sha: str = None) -> str:
+        """
+        Fetches file content with multiple fallback strategies and retries.
+        
+        Strategy 1: GitHub Contents API (/contents/)
+        Strategy 2: Raw content URL (raw.githubusercontent.com) 
+        Strategy 3: Git Blob API (/git/blobs/) using SHA from tree
+        
+        Returns file content string, or None if all strategies fail.
+        """
+        import base64
+        
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            # Strategy 1: Contents API (works for files < 1MB)
+            try:
+                content_url = f"https://api.github.com/repos/{owner}/{repo_name}/contents/{path}?ref={branch}"
+                content_resp = requests.get(content_url, headers=headers, timeout=30)
+                
+                if content_resp.status_code == 200:
+                    content_data = content_resp.json()
+                    
+                    # Handle array response (directory listing - skip)
+                    if isinstance(content_data, list):
+                        return None
+                    
+                    if content_data.get('encoding') == 'base64' and content_data.get('content'):
+                        return base64.b64decode(content_data['content']).decode('utf-8', errors='ignore')
+                    
+                    # Some files return download_url instead
+                    download_url = content_data.get('download_url')
+                    if download_url:
+                        raw_resp = requests.get(download_url, timeout=30)
+                        if raw_resp.status_code == 200:
+                            return raw_resp.text
+                
+                elif content_resp.status_code == 403:
+                    # File too large for Contents API (>1MB) or rate limited
+                    if 'too large' in content_resp.text.lower():
+                        break  # Skip to Strategy 2
+                    # Rate limited - wait and retry
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                    
+                elif content_resp.status_code == 404:
+                    return None  # File doesn't exist
+                    
+                elif content_resp.status_code == 429:
+                    # Rate limited
+                    time.sleep(5 * (attempt + 1))
+                    continue
+                    
+            except requests.exceptions.Timeout:
+                print(f"  [⏱️] Timeout fetching {path} (attempt {attempt+1})")
+                continue
+            except Exception as e:
+                print(f"  [!] Contents API error for {path}: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+                    continue
+        
+        # Strategy 2: Raw content URL (no size limit, no API rate limit)
+        try:
+            raw_url = f"https://raw.githubusercontent.com/{owner}/{repo_name}/{branch}/{path}"
+            raw_resp = requests.get(raw_url, timeout=30)
+            if raw_resp.status_code == 200:
+                # Check if content looks like binary
+                try:
+                    text = raw_resp.content.decode('utf-8')
+                    # Heuristic: if > 10% null bytes, it's binary
+                    if text.count('\x00') > len(text) * 0.1:
+                        return None
+                    return text
+                except UnicodeDecodeError:
+                    return None  # Binary file
+        except Exception as e:
+            print(f"  [!] Raw URL fallback failed for {path}: {e}")
+        
+        # Strategy 3: Git Blob API (if we have the SHA)
+        if blob_sha:
+            try:
+                blob_url = f"https://api.github.com/repos/{owner}/{repo_name}/git/blobs/{blob_sha}"
+                blob_resp = requests.get(blob_url, headers=headers, timeout=30)
+                if blob_resp.status_code == 200:
+                    blob_data = blob_resp.json()
+                    if blob_data.get('encoding') == 'base64':
+                        return base64.b64decode(blob_data['content']).decode('utf-8', errors='ignore')
+            except Exception as e:
+                print(f"  [!] Blob API fallback failed for {path}: {e}")
+        
+        print(f"  [✗] All fetch strategies failed for: {path}")
+        _add_debug_log('ERROR', 'DEEP_SCAN', f'Failed to fetch: {path}', {
+            'owner': owner, 'repo': repo_name, 'branch': branch
+        })
+        return None
+
     def _detect_language(self, path: str, content: str) -> str:
         """Detect programming language from file path and content."""
         ext_map = {
             '.py': 'python', '.js': 'javascript', '.ts': 'typescript',
             '.tsx': 'typescript-react', '.jsx': 'javascript-react',
+            '.mjs': 'javascript', '.cjs': 'javascript',
             '.json': 'json', '.yaml': 'yaml', '.yml': 'yaml',
-            '.html': 'html', '.css': 'css', '.sql': 'sql'
+            '.html': 'html', '.htm': 'html', '.css': 'css',
+            '.scss': 'scss', '.sass': 'sass', '.less': 'less',
+            '.sql': 'sql', '.md': 'markdown', '.mdx': 'mdx',
+            '.xml': 'xml', '.svg': 'svg',
+            '.vue': 'vue', '.svelte': 'svelte',
+            '.ejs': 'ejs', '.pug': 'pug', '.hbs': 'handlebars',
+            '.rb': 'ruby', '.go': 'go', '.rs': 'rust',
+            '.java': 'java', '.php': 'php', '.c': 'c', '.cpp': 'cpp',
+            '.cs': 'csharp', '.swift': 'swift', '.kt': 'kotlin',
+            '.dart': 'dart', '.lua': 'lua', '.sh': 'bash',
+            '.bat': 'batch', '.ps1': 'powershell',
+            '.toml': 'toml', '.ini': 'ini', '.cfg': 'ini',
+            '.prisma': 'prisma', '.graphql': 'graphql', '.gql': 'graphql',
+            '.proto': 'protobuf', '.dockerfile': 'dockerfile',
+            '.astro': 'astro', '.r': 'r',
         }
         _, ext = os.path.splitext(path)
+        basename = os.path.basename(path)
+        
+        # Special files without extensions
+        if basename == 'Dockerfile':
+            return 'dockerfile'
+        if basename == 'Makefile':
+            return 'makefile'
+        if basename == 'Gemfile':
+            return 'ruby'
+        if basename == 'Procfile':
+            return 'yaml'
+        
         return ext_map.get(ext.lower(), 'text')
     
     def _analyze_file_for_tech_stack(self, path: str, content: str, result: dict):
@@ -639,11 +890,23 @@ This PR contains the **completely modernized** version of your legacy codebase.
         
         if '@app.route' in content or '@app.get' in content or '@app.post' in content:
             result["must_preserve"].append(f"API endpoints in {path}")
-            # Extract endpoint patterns
-            import re
+            # Extract Python/Flask/FastAPI endpoint patterns
             endpoints = re.findall(r'@app\.(get|post|put|delete|patch)\([\'"]([^\'"]+)[\'"]', content)
             for method, endpoint in endpoints:
                 result["api_endpoints"].append(f"{method.upper()} {endpoint}")
+        
+        # Also detect Express.js endpoints: app.get('/path', ...) or router.get('/path', ...)
+        if 'app.get(' in content or 'app.post(' in content or 'router.get(' in content:
+            express_endpoints = re.findall(
+                r'(?:app|router)\.(get|post|put|delete|patch|options)\s*\(\s*[\'"]([^\'"]+)[\'"]',
+                content
+            )
+            if express_endpoints:
+                result["must_preserve"].append(f"Express API endpoints in {path}")
+                for method, endpoint in express_endpoints:
+                    ep_str = f"{method.upper()} {endpoint}"
+                    if ep_str not in result["api_endpoints"]:
+                        result["api_endpoints"].append(ep_str)
         
         # Detect environment variables
         if '.env' in path or 'config' in path_lower:
@@ -678,46 +941,186 @@ This PR contains the **completely modernized** version of your legacy codebase.
 
 
     def _call_gemini(self, prompt: str, model: str = None) -> str:
-        """Raw HTTP call to Gemini API to bypass SDK installation issues."""
+        """Raw HTTP call to Gemini API with automatic model fallback."""
         if not self.api_key:
             raise ValueError("GEMINI_API_KEY is missing.")
         
-        target_model = model or "gemini-3-flash-preview" # Default fallback
-        url = f"{self.base_url}/{target_model}:generateContent?key={self.api_key}"
-
-        # DEBUG LOG FOR USER VISIBILITY
-        print(f"[*] Authenticating with Gemini API Key for model: {target_model}...")
-
+        target_model = model or "gemini-3-flash-preview"  # Use Gemini 3 Flash by default
+        
+        # Model fallback chain: Gemini 3 → Gemini 2 → Gemini 1.5
+        #   gemini-3-flash-preview: PRIMARY (1M context, latest)
+        #   gemini-2.0-flash:       FALLBACK (2K RPM, stable)
+        #   gemini-1.5-flash:       LAST RESORT (proven, high availability)
+        fallback_models = []
+        if target_model == "gemini-3-flash-preview":
+            fallback_models = ["gemini-2.0-flash", "gemini-1.5-flash"]
+        elif target_model == "gemini-3-pro-preview":
+            fallback_models = ["gemini-3-flash-preview", "gemini-2.0-flash", "gemini-1.5-pro"]
+        elif target_model in ("gemini-2.0-flash-exp", "gemini-2.0-flash"):
+            fallback_models = ["gemini-1.5-flash", "gemini-1.5-pro"]
+        elif target_model == "gemini-1.5-flash":
+            fallback_models = ["gemini-2.0-flash", "gemini-1.5-pro"]
+        elif target_model == "gemini-1.5-pro":
+            fallback_models = ["gemini-2.0-flash", "gemini-1.5-flash"]
+        else:
+            # Unknown model - use safe Gemini 3 → 2 → 1.5 chain
+            fallback_models = ["gemini-3-flash-preview", "gemini-2.0-flash", "gemini-1.5-flash"]
+        
+        # Remove the target model from fallbacks (avoid duplicate)
+        fallback_models = [m for m in fallback_models if m != target_model]
+        all_models = [target_model] + fallback_models
+        
         headers = {'Content-Type': 'application/json'}
         data = {
-            "contents": [{"parts": [{"text": prompt}]}]
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "maxOutputTokens": 65536,  # Request maximum output
+                "temperature": 0.2,         # Low temp for code generation accuracy
+            }
         }
 
-        # Retry logic for 429
-        max_retries = 5
-        base_wait = 2
+        for model_idx, current_model in enumerate(all_models):
+            is_fallback = model_idx > 0
+            if is_fallback:
+                logger.warning(f"   🔄 Falling back to model: {current_model}")
+                _add_debug_log('WARNING', 'GEMINI_API', f'Falling back to {current_model}', {
+                    'original_model': target_model,
+                    'fallback_index': model_idx,
+                })
 
-        for attempt in range(max_retries):
-            try:
-                response = requests.post(url, headers=headers, json=data)
-                
-                if response.status_code == 200:
-                    try:
-                        return response.json()['candidates'][0]['content']['parts'][0]['text']
-                    except (KeyError, IndexError):
-                        return f"[ERROR] Bad Response: {response.text}"
-                
-                elif response.status_code in [429, 500, 503]:
-                    wait = base_wait * (2 ** attempt)
-                    print(f"[*] API Error ({response.status_code}). Retrying in {wait}s...")
-                    time.sleep(wait)
+            logger.info(f"🤖 Gemini API call: model={current_model} | prompt_length={len(prompt)} chars{' (FALLBACK)' if is_fallback else ''}")
+            _add_debug_log('INFO', 'GEMINI_API', f'Calling {current_model}', {
+                'model': current_model,
+                'prompt_length': len(prompt),
+                'prompt_preview': prompt[:500],
+                'is_fallback': is_fallback,
+            })
+
+            actual_url = f"{self.base_url}/{current_model}:generateContent?key={self.api_key}"
+
+            # Retry logic for transient errors
+            max_retries = 4
+            base_wait = 3
+
+            for attempt in range(max_retries):
+                try:
+                    call_start = time.time()
+                    # 300s timeout for large code generation responses
+                    response = requests.post(actual_url, headers=headers, json=data, timeout=300)
+                    call_elapsed = time.time() - call_start
+                    
+                    logger.info(f"   Gemini response: HTTP {response.status_code} in {call_elapsed:.2f}s | body_size={len(response.text)} chars (attempt {attempt+1}/{max_retries})")
+                    _add_debug_log('INFO', 'GEMINI_API', f'Response: HTTP {response.status_code}', {
+                        'status_code': response.status_code,
+                        'elapsed_ms': round(call_elapsed * 1000),
+                        'response_size': len(response.text),
+                        'attempt': attempt + 1,
+                        'model': current_model,
+                    })
+                    
+                    if response.status_code == 200:
+                        try:
+                            resp_json = response.json()
+                            candidates = resp_json.get('candidates', [])
+                            if not candidates:
+                                # Check for prompt feedback (blocked)
+                                feedback = resp_json.get('promptFeedback', {})
+                                block_reason = feedback.get('blockReason', '')
+                                if block_reason:
+                                    logger.warning(f"   ⚠️ Prompt blocked: {block_reason}")
+                                    _add_debug_log('WARNING', 'GEMINI_API', f'Prompt blocked: {block_reason}', {'feedback': feedback})
+                                    return f"[ERROR] Prompt blocked by safety filter: {block_reason}"
+                                logger.error(f"   ❌ Empty candidates in response")
+                                _add_debug_log('ERROR', 'GEMINI_API', 'Empty candidates', {'response': resp_json})
+                                break  # Try next model
+                            
+                            result = candidates[0]['content']['parts'][0]['text']
+                            logger.info(f"   ✅ Gemini success ({current_model}): {len(result)} chars returned")
+                            _add_debug_log('INFO', 'GEMINI_API', f'Success: {len(result)} chars', {
+                                'model_used': current_model,
+                                'response_preview': result[:500],
+                            })
+                            return result
+                        except (KeyError, IndexError) as parse_err:
+                            logger.error(f"   ❌ Bad response structure: {parse_err} | {response.text[:300]}")
+                            _add_debug_log('ERROR', 'GEMINI_API', 'Bad response structure', {'error': str(parse_err), 'response_text': response.text[:500]})
+                            break  # Try next model
+                    
+                    elif response.status_code == 429:
+                        # Rate limited - wait longer with jitter
+                        import random
+                        wait = base_wait * (2 ** attempt) + random.uniform(0, 2)
+                        logger.warning(f"   ⚠️ Rate limited (429). Retry {attempt+1}/{max_retries} in {wait:.1f}s...")
+                        _add_debug_log('WARNING', 'GEMINI_API', f'Rate limited (429)', {
+                            'wait_seconds': round(wait, 1),
+                            'attempt': attempt + 1,
+                            'response_text': response.text[:300],
+                        })
+                        time.sleep(wait)
+                        continue
+                    
+                    elif response.status_code in [500, 503]:
+                        # Server error - check if it's a model availability issue
+                        wait = base_wait * (attempt + 1)
+                        error_text = response.text[:500]
+                        try:
+                            error_json = response.json()
+                            error_detail = error_json.get('error', {}).get('message', error_text)
+                        except:
+                            error_detail = error_text
+                        
+                        logger.warning(f"   ⚠️ Server error ({response.status_code}): {error_detail[:200]}")
+                        logger.warning(f"   ⏱️ Retry {attempt+1}/{max_retries} in {wait}s...")
+                        _add_debug_log('WARNING', 'GEMINI_API', f'Server error: {response.status_code}', {
+                            'wait_seconds': wait,
+                            'attempt': attempt + 1,
+                            'error_message': error_detail[:500],
+                            'model': current_model,
+                        })
+                        time.sleep(wait)
+                        continue
+                    
+                    elif response.status_code == 400:
+                        # Bad request - possibly prompt too large or model issue
+                        error_msg = response.text[:500]
+                        logger.error(f"   ❌ Bad request (400): {error_msg}")
+                        _add_debug_log('ERROR', 'GEMINI_API', f'Bad request (400)', {'response_text': error_msg})
+                        
+                        if 'too long' in error_msg.lower() or 'token' in error_msg.lower() or 'size' in error_msg.lower():
+                            logger.warning(f"   📏 Prompt may be too large ({len(prompt)} chars). Trying next model...")
+                        # Always try fallback model for 400 errors
+                        break  # Try fallback model
+                    
+                    else:
+                        logger.error(f"   ❌ API error {response.status_code}: {response.text[:300]}")
+                        _add_debug_log('ERROR', 'GEMINI_API', f'API error: {response.status_code}', {
+                            'response_text': response.text[:500],
+                        })
+                        break  # Try next model
+                        
+                except requests.exceptions.Timeout:
+                    logger.warning(f"   ⏱️ Request timed out (300s). Retry {attempt+1}/{max_retries}...")
+                    _add_debug_log('WARNING', 'GEMINI_API', 'Request timeout (300s)', {'attempt': attempt + 1})
                     continue
-                else:
-                    return f"[ERROR] API {response.status_code}: {response.text}"
-            except Exception as e:
-                return f"[ERROR] Request Failed: {str(e)}"
+                except Exception as e:
+                    logger.error(f"   ❌ Request failed: {e}")
+                    _add_debug_log('ERROR', 'GEMINI_API', f'Request exception: {e}', {'traceback': tb_module.format_exc()})
+                    break  # Try next model
+            else:
+                # All retries for this model exhausted (only reached if all `continue`d)
+                logger.warning(f"   ⚠️ All retries exhausted for {current_model}, trying next model...")
+                continue
+            
+            # `break` from inner loop = try next model in fallback chain
+            continue
         
-        return "[ERROR] Max retries exceeded (Gemini API is overloaded)."
+        # All models exhausted — raise so callers can handle properly
+        logger.error(f"   ❌ All models exhausted. Tried: {', '.join(all_models)}")
+        _add_debug_log('ERROR', 'GEMINI_API', 'All models exhausted', {'models_tried': all_models})
+        raise GeminiAPIError(
+            f"All Gemini models failed after retries. Models tried: {', '.join(all_models)}. Check your API key quota at https://aistudio.google.com/",
+            models_tried=all_models,
+        )
 
     def clean_code(self, text: str) -> str:
         """Extracts code from markdown blocks."""
@@ -725,177 +1128,215 @@ This PR contains the **completely modernized** version of your legacy codebase.
         match = re.search(pattern, text, re.DOTALL)
         if match:
             return match.group(1).strip()
-        # If no markdown, assume raw text is code if it looks like it
         return text.strip()
+
+    def _parse_files_from_response(self, response: str) -> list:
+        """
+        Robust XML file parser with multiple fallback strategies.
+        Handles edge cases like nested code blocks, special chars, malformed tags.
+        
+        Returns list of {"filename": str, "content": str}
+        """
+        files = []
+        seen_paths = set()
+
+        def _clean_content(raw: str) -> str:
+            """Strip markdown code fences the model sometimes wraps content in."""
+            c = raw.strip()
+            c = re.sub(r'^```\w*\n', '', c)
+            c = re.sub(r'\n```\s*$', '', c)
+            return c
+
+        # Strategy 1: Standard regex
+        pattern = r'<file\s+path="(.*?)">(.*?)</file>'
+        matches = re.findall(pattern, response, re.DOTALL)
+        for fp, content in matches:
+            fp = fp.strip()
+            if fp and fp not in seen_paths:
+                files.append({"filename": fp, "content": _clean_content(content)})
+                seen_paths.add(fp)
+        if files:
+            return files
+
+        # Strategy 2: Single-quoted paths
+        pattern2 = r"<file\s+path=['\"]([^'\"]+)['\"]>(.*?)</file>"
+        matches2 = re.findall(pattern2, response, re.DOTALL)
+        for fp, content in matches2:
+            fp = fp.strip()
+            if fp and fp not in seen_paths:
+                files.append({"filename": fp, "content": _clean_content(content)})
+                seen_paths.add(fp)
+        if files:
+            return files
+
+        # Strategy 3: Extra whitespace in tags
+        pattern3 = r'<file\s+path\s*=\s*"([^"]+)"\s*>(.*?)</file\s*>'
+        matches3 = re.findall(pattern3, response, re.DOTALL)
+        for fp, content in matches3:
+            fp = fp.strip()
+            if fp and fp not in seen_paths:
+                files.append({"filename": fp, "content": _clean_content(content)})
+                seen_paths.add(fp)
+        if files:
+            return files
+
+        # Strategy 4: Line-by-line state machine for deeply malformed output
+        in_file = False
+        current_path = None
+        current_content = []
+
+        for line in response.split('\n'):
+            start_match = re.match(r'<file\s+path\s*=\s*["\']([^"\']+)["\']', line)
+            if start_match:
+                # Save any previous file
+                if in_file and current_path and current_content:
+                    fp = current_path.strip()
+                    if fp not in seen_paths:
+                        files.append({"filename": fp, "content": _clean_content('\n'.join(current_content))})
+                        seen_paths.add(fp)
+                current_path = start_match.group(1)
+                current_content = []
+                in_file = True
+                after_tag = re.sub(r'<file\s+path\s*=\s*["\'][^"\']+["\']>\s*', '', line)
+                if after_tag.strip():
+                    current_content.append(after_tag.rstrip())
+                continue
+
+            if '</file' in line and in_file:
+                before_tag = line.split('</file')[0]
+                if before_tag.strip():
+                    current_content.append(before_tag.rstrip())
+                fp = current_path.strip()
+                if fp not in seen_paths:
+                    files.append({"filename": fp, "content": _clean_content('\n'.join(current_content))})
+                    seen_paths.add(fp)
+                in_file = False
+                current_path = None
+                current_content = []
+                continue
+
+            if in_file:
+                current_content.append(line)
+
+        # Handle unclosed last file
+        if in_file and current_path and current_content:
+            fp = current_path.strip()
+            if fp not in seen_paths:
+                files.append({"filename": fp, "content": _clean_content('\n'.join(current_content))})
+
+        if files:
+            print(f"[PARSER] Recovered {len(files)} files using state-machine parser")
+            _add_debug_log('WARNING', 'PARSER', f'Used fallback state-machine parser', {'files_recovered': len(files)})
+
+        return files
 
     def generate_modernization_plan(self, repo_url: str, instructions: str, deep_scan_result: dict = None) -> str:
         """
-        PRESERVATION-FIRST PLANNING
-        Analyzes existing codebase and creates a plan that PRESERVES functionality
-        while only modernizing UI and optimizing performance.
-        """
+        PRESERVATION-FIRST PLANNING (v7.0 - LIGHTWEIGHT)
         
-        # Build context from deep scan
+        Sends ONLY file paths, tech stack, and endpoint metadata to Gemini.
+        NO full file contents in the plan prompt - keeps it fast and small.
+        Also requests FILE GROUPINGS for batch processing.
+        """
         if deep_scan_result:
             tech_stack = deep_scan_result.get("tech_stack", {})
             must_preserve = deep_scan_result.get("must_preserve", [])
             can_modernize = deep_scan_result.get("can_modernize", [])
             api_endpoints = deep_scan_result.get("api_endpoints", [])
             files = deep_scan_result.get("files", [])
-            file_count = len(files)
+            file_paths = [f["path"] for f in files]
             
-            # Create file contents - NO LIMITS! Send FULL content to Gemini
-            files_content = ""
-            for f in files:  # ALL files - no limit!
-                files_content += f"\n\n=== FILE: {f['path']} ===\n```{f['language']}\n{f['content']}\n```"  # FULL content!
+            total_chars = sum(len(f.get("content", "")) for f in files)
+            print(f"[PLAN] Lightweight planning: {len(files)} files, {total_chars:,} total chars")
+            print(f"[PLAN] Sending ONLY file paths + metadata (NOT full file contents)")
+            _add_debug_log('INFO', 'PLAN', f'Lightweight plan: {len(files)} files, {total_chars:,} chars of source code', {
+                'file_count': len(files),
+                'total_chars': total_chars,
+                'tech_stack': tech_stack,
+            })
             
-            preservation_context = f"""
-═══════════════════════════════════════════════════════════════════════════════
-EXISTING CODEBASE ANALYSIS (FROM DEEP SCAN)
-═══════════════════════════════════════════════════════════════════════════════
-
-DETECTED TECH STACK:
-- Backend Framework: {tech_stack.get('backend', {}).get('framework', 'Unknown')}
-- Database: {tech_stack.get('backend', {}).get('database', 'Unknown')}
-- Frontend Framework: {tech_stack.get('frontend', {}).get('framework', 'Unknown')}
-
-🔒 MUST PRESERVE (DO NOT CHANGE):
-{chr(10).join(['- ' + item for item in must_preserve[:20]])}
-
-✅ CAN MODERNIZE (UI/UX ONLY):
-{chr(10).join(['- ' + item for item in can_modernize[:20]])}
-
-DETECTED API ENDPOINTS (KEEP EXACTLY AS-IS):
-{chr(10).join(['- ' + ep for ep in api_endpoints[:20]])}
-
-───────────────────────────────────────────────────────────────────────────────
-FULL FILE CONTENTS (USE THESE AS BASE):
-───────────────────────────────────────────────────────────────────────────────
-{files_content}
-"""
+            prompt = get_lightweight_plan_prompt(
+                repo_url=repo_url,
+                instructions=instructions,
+                file_paths=file_paths,
+                tech_stack=tech_stack,
+                api_endpoints=api_endpoints,
+                must_preserve=must_preserve,
+                can_modernize=can_modernize,
+            )
         else:
-            preservation_context = "[DEEP SCAN NOT AVAILABLE - Using path-only mode]"
-            file_count = 0
+            # Fallback: minimal prompt if no deep scan
+            total_chars = 0
+            prompt = f"""Create a modernization plan for {repo_url}.
+Instructions: {instructions if instructions else 'Modernize UI while preserving all functionality'}
+Group the files into batches for processing."""
         
-        prompt = f"""
-╔══════════════════════════════════════════════════════════════════════════════╗
-║  LAZARUS ENGINE - PRESERVATION-FIRST MODERNIZATION SYSTEM                   ║
-║  VERSION: 4.0 - PRESERVE & ENHANCE (NOT REPLACE!)                           ║
-╚══════════════════════════════════════════════════════════════════════════════╝
+        print(f"[PLAN] Plan prompt size: {len(prompt):,} chars (vs old approach: would have been {total_chars + len(prompt):,}+)")
+        _add_debug_log('DEBUG', 'PLAN', f'Plan prompt: {len(prompt):,} chars', {})
+        
+        # Use planner model (2.0-flash: 2K RPM, planning is simple)
+        try:
+            return self._call_gemini(prompt, model=self.planner_model)
+        except GeminiAPIError as e:
+            logger.warning(f"[PLAN] Gemini API failed for planning: {e}")
+            _add_debug_log('WARNING', 'PLAN', f'Planning API failed, building synthetic plan', {'error': str(e)})
+            # Build a synthetic plan from deep_scan_result so code gen can still work
+            return self._build_fallback_plan(repo_url, instructions, deep_scan_result)
 
-ROLE: You are an elite architect who PRESERVES working systems while enhancing them.
+    def _build_fallback_plan(self, repo_url: str, instructions: str, deep_scan_result: dict = None) -> str:
+        """
+        Build a synthetic modernization plan when the Gemini API is unavailable.
+        Uses tech stack and file list from deep_scan_result.
+        """
+        if not deep_scan_result:
+            return f"Modernize {repo_url}. Instructions: {instructions or 'Preserve all functionality and modernize the UI.'}"
+        
+        tech_stack = deep_scan_result.get("tech_stack", {})
+        files = deep_scan_result.get("files", [])
+        file_paths = [f["path"] for f in files]
+        
+        backend = tech_stack.get("backend", {})
+        frontend_tech = tech_stack.get("frontend", {})
+        
+        # Group files by directory for batch suggestions
+        dir_groups = {}
+        for fp in file_paths:
+            parts = fp.replace("\\", "/").split("/")
+            group = parts[0] if len(parts) > 1 else "root"
+            dir_groups.setdefault(group, []).append(fp)
+        
+        plan = f"""# Fallback Modernization Plan for {repo_url}
+## (Auto-generated from repository scan — Gemini API was unavailable)
 
-═══════════════════════════════════════════════════════════════════════════════
-🎯 THE GOLDEN RULE
-═══════════════════════════════════════════════════════════════════════════════
+### Instructions
+{instructions or 'Modernize the UI while preserving ALL backend logic, database schemas, and API endpoints.'}
 
-"IF IT WORKS, DON'T BREAK IT. IF IT'S UGLY, MAKE IT PRETTY. IF IT'S SLOW, MAKE IT FAST."
+### Detected Tech Stack
+- Backend Framework: {backend.get('framework', 'Unknown')}
+- Backend Language: {backend.get('language', 'Unknown')}
+- Database: {backend.get('database', 'None detected')}
+- Frontend Framework: {frontend_tech.get('framework', 'Unknown')}
 
-YOU MUST:
-1. PRESERVE all existing functionality - every API endpoint, every database query
-2. KEEP the same database (MongoDB stays MongoDB, PostgreSQL stays PostgreSQL)
-3. MAINTAIN all existing data schemas and models
-4. ONLY modernize the UI/UX layer
-5. OPTIMIZE slow code (but output must remain identical)
-6. ADD new features ON TOP of existing ones (don't replace)
+### Files ({len(file_paths)} total)
+{chr(10).join(f'- {p}' for p in file_paths)}
 
-YOU MUST NOT:
-❌ Change the database type (e.g., MongoDB → SQLite is FORBIDDEN)
-❌ Rename or remove existing API endpoints
-❌ Modify existing data schemas
-❌ Remove any existing functionality
-❌ Create a "new architecture" - you are ENHANCING, not replacing!
-
-═══════════════════════════════════════════════════════════════════════════════
-📦 LEGACY REPOSITORY
-═══════════════════════════════════════════════════════════════════════════════
-
-Repository URL: {repo_url}
-User Preferences: "{instructions if instructions else 'Modernize UI while preserving all functionality'}"
-
-{preservation_context}
-
-═══════════════════════════════════════════════════════════════════════════════
-📋 YOUR PLANNING TASK
-═══════════════════════════════════════════════════════════════════════════════
-
-PHASE 1: PRESERVATION AUDIT
-Analyze the existing codebase and list:
-1. All API endpoints that MUST work exactly as before
-2. Database type and connection (DO NOT CHANGE)
-3. Data models/schemas (PRESERVE EXACTLY)
-4. Authentication method (KEEP SAME)
-5. Core business logic (KEEP SAME)
-
-PHASE 2: ENHANCEMENT TARGETS (NOT REPLACEMENT!)
-Identify what can be ENHANCED IN-PLACE:
-1. HTML files - Add modern CSS classes, better structure (KEEP SAME FILES!)
-2. CSS files - Modernize styling (dark mode, better colors, animations)
-3. JavaScript - Convert var→const, add async/await (KEEP SAME FILES!)
-4. Server files - Add error handling, logging (KEEP ALL ENDPOINTS!)
-5. Performance - Optimize slow code (SAME OUTPUT!)
-
-⚠️ YOU ARE NOT CREATING A NEW FRAMEWORK! ⚠️
-- If original uses HTML files → KEEP HTML files (modernize them!)
-- If original uses Vue.js → KEEP Vue.js (enhance it!)
-- If original uses Express → KEEP Express (optimize it!)
-- DO NOT replace HTML with React/Next.js
-- DO NOT create a new folder structure
-
-PHASE 3: IN-PLACE ENHANCEMENT PLAN
-
-**Backend (Express.js - PRESERVE COMPLETELY)**:
-- KEEP: Same framework (Express stays Express!)
-- KEEP: Same database and connection strings
-- KEEP: ALL API endpoints (exact same paths and methods)
-- KEEP: Same authentication flow
-- KEEP: Same file structure
-- ADD: Better error handling, logging
-- ADD: CORS middleware
-
-**Frontend (ENHANCE EXISTING FILES, NOT REPLACE)**:
-- KEEP: All original HTML/CSS/JS files
-- KEEP: Same file paths and structure
-- ENHANCE: Add modern CSS to existing HTML
-- ENHANCE: Add responsive design
-- ENHANCE: Improve JavaScript (ES6+)
-- DO NOT: Create new React/Next.js/Vue files
-
-PHASE 4: OUTPUT REQUIREMENTS
-
-Your plan MUST include:
-
-1. **PRESERVATION CHECKLIST**:
-   - [ ] All {file_count} original files will be output
-   - [ ] All existing API endpoints preserved
-   - [ ] Database type unchanged
-   - [ ] Same file paths used
-
-2. **BACKEND ENHANCEMENT**:
-   - Files to enhance: [list ALL server files from original]
-   - Endpoints to preserve: [list ALL - no exceptions!]
-   - Additions: [only logging, error handling if missing]
-
-3. **FRONTEND ENHANCEMENT**:
-   - HTML files to enhance: [list ALL HTML files from original]
-   - CSS changes: [describe modern styling to add]
-   - JavaScript improvements: [list syntax upgrades]
-
-4. **FILE OUTPUT**:
-   List ALL files you will output:
-   - [PRESERVE] - Original path, enhanced content
-   
-   Example:
-   - [PRESERVE] Home/Home/admin.html
-   - [PRESERVE] Home/Home/adminserver.js
-   - [PRESERVE] Home/Home/styles.css
-
-⚠️ CRITICAL: You must output ALL {file_count} original files!
-
-Output format: Plain text architectural plan with clear sections.
+### Batch Groups
 """
-        # Use Gemini 3 Pro for complex reasoning
-        return self._call_gemini(prompt, model="gemini-3-pro-preview")
+        for i, (group, group_files) in enumerate(dir_groups.items(), 1):
+            plan += f"\n#### BATCH {i}: {group}\n"
+            for f in group_files:
+                plan += f"- {f}\n"
+        
+        plan += """
+### Modernization Strategy
+1. PRESERVE all backend logic, API endpoints, and database schemas exactly
+2. Modernize the frontend with clean HTML/CSS/JS or React
+3. Keep the same file structure where possible
+4. Ensure all imports and dependencies are correct
+"""
+        print(f"[PLAN] Built fallback plan from scan data ({len(plan)} chars)")
+        _add_debug_log('INFO', 'PLAN', f'Fallback plan built: {len(plan)} chars', {})
+        return plan
 
     def generate_code(self, plan: str, deep_scan_result: dict = None, repo_url: str = None) -> dict:
         """
@@ -904,6 +1345,7 @@ Output format: Plain text architectural plan with clear sections.
         
         deep_scan_result: Contains existing codebase info for preservation.
         repo_url: Repository URL for loading resurrection memory.
+        Raises GeminiAPIError if the API is unreachable.
         """
         # Load resurrection memory for this repository
         memory_context = ""
@@ -918,97 +1360,551 @@ Output format: Plain text architectural plan with clear sections.
         # Pass memory_context for cross-session learning
         prompt = get_code_generation_prompt(plan, deep_scan_result, memory_context)
         
-        # Phase 2: Write Code -> Gemini 3 Pro (Needs Reasoning)
-        response = self._call_gemini(prompt, model="gemini-3-pro-preview")
-        print("[DEBUG] Gemini 3 Pro Connected Successfully. Code Generated.")
+        # Phase 2: Write Code -> Use coder model (3-flash: 1K RPM)
+        # GeminiAPIError will propagate up to process_resurrection_stream's try/except
+        response = self._call_gemini(prompt, model=self.coder_model)
+        print(f"[DEBUG] {self.coder_model} Connected Successfully. Code Generated.")
         
-        # XML Parsing Strategy
-        files = []
-        pattern = r'<file path="(.*?)">\s*(.*?)\s*</file>'
-        matches = re.findall(pattern, response, re.DOTALL)
-        
-        for filepath, content in matches:
-            files.append({
-                "filename": filepath.strip(), 
-                "content": content.strip()
-            })
+        # Robust XML Parsing (multi-strategy)
+        files = self._parse_files_from_response(response)
             
         if not files:
-            # Fallback for debugging if regex fails
-            return {
-                "files": [{"filename": "error.log", "content": response}],
-                "entrypoint": "error.log",
-                "runtime": "unknown"
-            }
+            print(f"[!] XML parsing failed. Response preview: {response[:500]}")
+            _add_debug_log('ERROR', 'PARSER', 'No files parsed from response', {
+                'response_length': len(response),
+                'response_preview': response[:1000],
+            })
+            # Raise instead of returning error.log sentinel — let the retry loop handle it
+            raise Exception(f"CODE GENERATION FAILED: Gemini returned {len(response)} chars but no parseable files. Preview: {response[:200]}")
+        
+        print(f"[*] Parsed {len(files)} files from Gemini response")
 
-        # SMART ENTRYPOINT DETECTION
-        # Detect runtime and entrypoint based on generated files
-        entrypoint = None
-        runtime = "python"  # Default
+        # Categorize files for clarity
+        backend_files = [f for f in files if 'backend' in f['filename'].lower() or f['filename'].endswith('.py') or 'api' in f['filename'].lower()]
+        frontend_files = [f for f in files if 'frontend' in f['filename'].lower() or f['filename'].endswith(('.html', '.css', '.jsx', '.tsx'))]
+        config_files = [f for f in files if f['filename'] in ('requirements.txt', 'package.json', '.env', 'Dockerfile')]
         
-        # Priority order for entrypoints
-        node_entrypoints = [
-            "server.js", "index.js", "app.js", "main.js",
-            "adminserver.js", "backend.js"
-        ]
-        python_entrypoints = [
-            "main.py", "app.py", "server.py", "run.py"
-        ]
+        if backend_files:
+            print(f"[*] Backend files: {[f['filename'] for f in backend_files[:5]]}{' ...' if len(backend_files) > 5 else ''}")
+        if frontend_files:
+            print(f"[*] Frontend files: {[f['filename'] for f in frontend_files[:5]]}{' ...' if len(frontend_files) > 5 else ''}")
+
+        # Use centralized entrypoint detection
+        entrypoint, runtime = self._detect_entrypoint_and_runtime(files)
+        print(f"[*] 🎯 Entrypoint Selected: {entrypoint} (runtime: {runtime})")
         
-        for f in files:
-            filename = f["filename"]
-            basename = os.path.basename(filename)
-            
-            # Check for Node.js entrypoints
-            if basename in node_entrypoints or filename.endswith("server.js"):
-                entrypoint = filename
-                runtime = "node"
-                print(f"[*] Detected Node.js entrypoint: {entrypoint}")
-                break
-            
-            # Check for Python entrypoints
-            if basename in python_entrypoints:
-                entrypoint = filename
-                runtime = "python"
-                print(f"[*] Detected Python entrypoint: {entrypoint}")
-                break
-        
-        # Fallback: Look for package.json (Node.js) or requirements.txt (Python)
-        if not entrypoint:
-            for f in files:
-                if f["filename"].endswith("package.json"):
-                    # Node.js project - find the main server file
-                    runtime = "node"
-                    for ff in files:
-                        if ff["filename"].endswith(".js") and "server" in ff["filename"].lower():
-                            entrypoint = ff["filename"]
-                            break
-                    if not entrypoint:
-                        # Try to find any .js file
-                        for ff in files:
-                            if ff["filename"].endswith(".js"):
-                                entrypoint = ff["filename"]
-                                break
-                    break
-                elif f["filename"].endswith("requirements.txt") or f["filename"].endswith(".py"):
-                    runtime = "python"
-                    # Python project - use default
-                    entrypoint = "modernized_stack/backend/main.py"
-                    break
-        
-        # Final fallback
-        if not entrypoint:
-            if any(f["filename"].endswith(".js") for f in files):
-                runtime = "node"
-                entrypoint = next((f["filename"] for f in files if f["filename"].endswith(".js")), None)
-            else:
-                runtime = "python"
-                entrypoint = "modernized_stack/backend/main.py"
-        
-        print(f"[*] Smart Detection: Runtime={runtime}, Entrypoint={entrypoint}")
+        if 'frontend' in entrypoint.lower():
+            print(f"[!] WARNING: Entrypoint appears to be frontend file - this should not happen!")
 
         return {
             "files": files,
+            "entrypoint": entrypoint,
+            "runtime": runtime
+        }
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # MULTI-BATCH CODE GENERATION (v7.0)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _detect_entrypoint_and_runtime(self, files: list) -> tuple:
+        """
+        Detects runtime and entrypoint from generated files.
+        Returns (entrypoint, runtime) tuple.
+        
+        Priority:
+        1. Python backend if requirements.txt exists
+        2. Node.js server files (excluding frontend/)
+        3. Fallback to first .py or .js file
+        """
+        entrypoint = None
+        runtime = "python"
+
+        # Check if there's a Python backend first (requirements.txt is a strong signal)
+        has_python_backend = any(f["filename"].endswith("requirements.txt") for f in files)
+        has_any_py = any(f["filename"].endswith(".py") for f in files)
+        
+        python_entrypoints = [
+            "main.py", "app.py", "server.py", "run.py", "api.py"
+        ]
+        node_server_entrypoints = [
+            "server.js", "index.js", "backend.js", "api.js"
+        ]
+        
+        # PRIORITY 1: If requirements.txt exists, prefer Python backend
+        if has_python_backend or has_any_py:
+            for f in files:
+                filename = f["filename"]
+                basename = os.path.basename(filename)
+                # Skip frontend files
+                if "frontend" in filename.lower() or "client" in filename.lower():
+                    continue
+                if basename in python_entrypoints:
+                    entrypoint = filename
+                    runtime = "python"
+                    break
+            
+            # If no named entrypoint, find first .py file in backend/
+            if not entrypoint:
+                for f in files:
+                    fn = f["filename"]
+                    if fn.endswith(".py") and ("backend" in fn.lower() or "api" in fn.lower()):
+                        entrypoint = fn
+                        runtime = "python"
+                        break
+        
+        # PRIORITY 2: Node.js server files (but exclude frontend/)
+        if not entrypoint:
+            for f in files:
+                filename = f["filename"]
+                basename = os.path.basename(filename)
+                
+                # CRITICAL: Skip frontend directories
+                if "frontend" in filename.lower() or "client" in filename.lower() or "public" in filename.lower():
+                    continue
+                
+                # Check if it's a Node.js server file
+                if basename in node_server_entrypoints or filename.endswith("server.js"):
+                    # Verify it's not client-side JS by checking content
+                    content = f.get("content", "")
+                    is_client_side = ("document." in content or "window." in content or 
+                                    "addEventListener" in content or "getElementById" in content)
+                    if not is_client_side:
+                        entrypoint = filename
+                        runtime = "node"
+                        break
+
+        # PRIORITY 3: Fallback - check for package.json or any .py file
+        if not entrypoint:
+            # If there's ANY .py file, default to Python
+            py_files = [f for f in files if f["filename"].endswith(".py")]
+            if py_files:
+                runtime = "python"
+                # Try to find one in backend/
+                backend_py = next((f["filename"] for f in py_files if "backend" in f["filename"].lower()), None)
+                entrypoint = backend_py or py_files[0]["filename"]
+            elif any(f["filename"].endswith("package.json") for f in files):
+                # Only use Node if there's a package.json and it has server deps
+                runtime = "node"
+                # Look for server.js or index.js in backend/
+                for ff in files:
+                    fn = ff["filename"]
+                    if fn.endswith(".js") and ("backend" in fn.lower() or "server" in fn.lower()):
+                        content = ff.get("content", "")
+                        if "document." not in content and "window." not in content:
+                            entrypoint = fn
+                            break
+                if not entrypoint:
+                    # Couldn't find valid server - default to Python
+                    runtime = "python"
+                    entrypoint = "modernized_stack/backend/main.py"
+            else:
+                # No clear indicator - default to Python
+                runtime = "python"
+                entrypoint = "modernized_stack/backend/main.py"
+
+        return entrypoint, runtime
+
+    def _group_files_into_batches(self, files: list, plan: str = "", max_chars_per_batch: int = None) -> list:
+        """
+        Groups files into logical batches for multi-call processing.
+        
+        Strategy:
+        1. Try to parse batch groupings from the AI-generated plan
+        2. If plan parsing fails, fall back to directory-based grouping
+        3. Enforce max chars per batch to stay within token limits
+        
+        Args:
+            files: List of dicts with 'path', 'content', 'language'
+            plan: The modernization plan (may contain BATCH groupings)
+            max_chars_per_batch: Max total source chars per batch (auto-calculated from model if None)
+            
+        Returns:
+            List of batch dicts: [{"name": str, "files": [file_dicts]}]
+        """
+        # Dynamically calculate batch size based on coder model's context window
+        if max_chars_per_batch is None:
+            max_chars_per_batch = self.get_model_max_chars(self.coder_model)
+            print(f"[BATCH] Dynamic batch limit: {max_chars_per_batch:,} chars (model: {self.coder_model})")
+        # ── Attempt 1: Parse batch groups from plan ──
+        batches_from_plan = self._parse_batches_from_plan(plan, files)
+        if batches_from_plan:
+            # Validate all files are assigned
+            assigned_paths = set()
+            for batch in batches_from_plan:
+                for f in batch["files"]:
+                    assigned_paths.add(f["path"])
+            
+            all_paths = set(f["path"] for f in files)
+            missing = all_paths - assigned_paths
+            
+            if not missing:
+                # All files assigned - enforce size limits
+                return self._split_oversized_batches(batches_from_plan, max_chars_per_batch)
+            else:
+                print(f"[BATCH] Plan missed {len(missing)} files, adding to extra batch")
+                _add_debug_log('WARNING', 'BATCH', f'Plan missed {len(missing)} files', {'missing': list(missing)[:10]})
+                missing_files = [f for f in files if f["path"] in missing]
+                batches_from_plan.append({"name": "Remaining Files", "files": missing_files})
+                return self._split_oversized_batches(batches_from_plan, max_chars_per_batch)
+
+        # ── Attempt 2: Directory-based grouping ──
+        print("[BATCH] Using directory-based grouping (plan parsing failed)")
+        _add_debug_log('INFO', 'BATCH', 'Using directory-based grouping fallback', {})
+        return self._group_by_directory(files, max_chars_per_batch)
+
+    def _parse_batches_from_plan(self, plan: str, files: list) -> list:
+        """
+        Tries to parse BATCH groupings from the AI plan.
+        Looks for patterns like:
+            BATCH 1 - Backend Core:
+            - path/to/file.js
+            - path/to/other.js
+        """
+        if not plan:
+            return []
+        
+        # Map paths to file dicts for quick lookup
+        path_to_file = {f["path"]: f for f in files}
+        
+        batches = []
+        current_batch = None
+        
+        for line in plan.split('\n'):
+            stripped = line.strip()
+            
+            # Detect batch header: "BATCH N - Name:" or "BATCH N: Name" or "**BATCH N - Name**:"
+            batch_match = re.match(
+                r'(?:\*\*)?BATCH\s+\d+\s*[-:]\s*(.+?)(?:\*\*)?:?\s*$',
+                stripped, re.IGNORECASE
+            )
+            if batch_match:
+                if current_batch and current_batch["files"]:
+                    batches.append(current_batch)
+                current_batch = {"name": batch_match.group(1).strip().rstrip(':'), "files": []}
+                continue
+            
+            # Detect file path lines: "- path/to/file.ext" or "  - path/to/file.ext"
+            if current_batch is not None and stripped.startswith('- '):
+                file_path = stripped[2:].strip()
+                # Clean up any markdown or quotes
+                file_path = file_path.strip('`"\'')
+                
+                # Try direct match
+                if file_path in path_to_file:
+                    current_batch["files"].append(path_to_file[file_path])
+                else:
+                    # Try fuzzy match (path might have slight differences)
+                    for p, f in path_to_file.items():
+                        if p.endswith(file_path) or file_path.endswith(p) or os.path.basename(p) == os.path.basename(file_path):
+                            current_batch["files"].append(f)
+                            break
+        
+        # Don't forget the last batch
+        if current_batch and current_batch["files"]:
+            batches.append(current_batch)
+        
+        if batches:
+            total_assigned = sum(len(b["files"]) for b in batches)
+            print(f"[BATCH] Parsed {len(batches)} batches from plan ({total_assigned}/{len(files)} files assigned)")
+            _add_debug_log('INFO', 'BATCH', f'Parsed {len(batches)} batches from plan', {
+                'batches': [{"name": b["name"], "file_count": len(b["files"])} for b in batches]
+            })
+        
+        return batches if batches else []
+
+    def _group_by_directory(self, files: list, max_chars_per_batch: int) -> list:
+        """
+        Fallback: groups files by their directory path.
+        Config files (package.json, requirements.txt, etc.) go in a separate batch.
+        """
+        config_extensions = {'.json', '.yml', '.yaml', '.toml', '.cfg', '.ini', '.env', '.lock'}
+        config_names = {'package.json', 'requirements.txt', 'tsconfig.json', '.gitignore', 
+                       'Dockerfile', 'docker-compose.yml', '.env', '.env.example',
+                       'next.config.mjs', 'next.config.ts', 'tailwind.config.ts',
+                       'postcss.config.mjs', 'eslint.config.mjs', 'vite.config.ts'}
+        
+        dir_groups = {}
+        config_files = []
+        
+        for f in files:
+            basename = os.path.basename(f["path"])
+            ext = os.path.splitext(f["path"])[1]
+            
+            if basename in config_names or ext in config_extensions:
+                config_files.append(f)
+            else:
+                dir_path = os.path.dirname(f["path"]) or "root"
+                if dir_path not in dir_groups:
+                    dir_groups[dir_path] = []
+                dir_groups[dir_path].append(f)
+        
+        batches = []
+        if config_files:
+            batches.append({"name": "Config & Dependencies", "files": config_files})
+        
+        for dir_path, dir_files in sorted(dir_groups.items()):
+            batch_name = dir_path.replace('/', ' > ') if dir_path != "root" else "Root Files"
+            batches.append({"name": batch_name, "files": dir_files})
+        
+        return self._split_oversized_batches(batches, max_chars_per_batch)
+
+    def _split_oversized_batches(self, batches: list, max_chars: int) -> list:
+        """
+        Splits any batch that exceeds max_chars into smaller sub-batches.
+        """
+        result = []
+        for batch in batches:
+            total_chars = sum(len(f.get("content", "")) for f in batch["files"])
+            
+            if total_chars <= max_chars:
+                result.append(batch)
+            else:
+                # Split into sub-batches
+                sub_batch_files = []
+                sub_batch_chars = 0
+                sub_idx = 1
+                
+                for f in batch["files"]:
+                    file_chars = len(f.get("content", ""))
+                    
+                    if sub_batch_chars + file_chars > max_chars and sub_batch_files:
+                        result.append({
+                            "name": f"{batch['name']} (Part {sub_idx})",
+                            "files": sub_batch_files
+                        })
+                        sub_batch_files = []
+                        sub_batch_chars = 0
+                        sub_idx += 1
+                    
+                    sub_batch_files.append(f)
+                    sub_batch_chars += file_chars
+                
+                if sub_batch_files:
+                    name = f"{batch['name']} (Part {sub_idx})" if sub_idx > 1 else batch['name']
+                    result.append({"name": name, "files": sub_batch_files})
+        
+        return result
+
+    def generate_code_batched(self, plan: str, deep_scan_result: dict, repo_url: str = None, progress_callback=None) -> dict:
+        """
+        Multi-batch code generation: processes files in logical groups
+        to avoid hitting API token limits.
+        
+        For repos with < 10 files, falls back to single-call generate_code().
+        
+        Args:
+            plan: The modernization plan (with batch groupings)
+            deep_scan_result: Deep scan results with file contents
+            repo_url: Repository URL for memory context
+            progress_callback: Optional callable(msg) for progress updates
+            
+        Returns:
+            dict with 'files', 'entrypoint', 'runtime'
+        """
+        files = deep_scan_result.get("files", [])
+        total_files = len(files)
+        
+        # Small/Medium repos: use single-call approach (maximize based on model capacity)
+        single_call_limit = int(self.get_model_max_chars(self.coder_model) * 0.7)  # 70% of limit for safety
+        
+        if total_files <= 150:  # Up from 100
+            total_chars = sum(len(f.get("content", "")) for f in files)
+            if total_chars < single_call_limit:
+                print(f"[BATCH] Single-call mode: {total_files} files, {total_chars:,} chars (limit: {single_call_limit:,})")
+                _add_debug_log('INFO', 'BATCH', f'Using single-call mode', {
+                    'file_count': total_files, 'total_chars': total_chars, 'model': self.coder_model
+                })
+                return self.generate_code(plan, deep_scan_result, repo_url)
+        
+        # Load memory context
+        memory_context = ""
+        if repo_url:
+            memory_context = get_memory_context_for_prompt(repo_url)
+        
+        # Group files into batches
+        batches = self._group_files_into_batches(files, plan)
+        
+        print(f"\n{'='*70}")
+        print(f"[BATCH] MULTI-BATCH CODE GENERATION")
+        print(f"[BATCH] Total files: {total_files} | Batches: {len(batches)}")
+        for i, batch in enumerate(batches):
+            batch_chars = sum(len(f.get("content", "")) for f in batch["files"])
+            print(f"[BATCH]   Batch {i+1}: {batch['name']} ({len(batch['files'])} files, {batch_chars:,} chars)")
+        print(f"{'='*70}\n")
+        
+        _add_debug_log('INFO', 'BATCH', f'Starting multi-batch generation', {
+            'total_files': total_files,
+            'batch_count': len(batches),
+            'batches': [{"name": b["name"], "files": len(b["files"])} for b in batches]
+        })
+        
+        # All file paths for cross-reference
+        all_file_paths = [f["path"] for f in files]
+        
+        # Process each batch
+        all_generated_files = []
+        previously_generated_summaries = ""
+        
+        for batch_idx, batch in enumerate(batches):
+            batch_name = batch["name"]
+            batch_files = batch["files"]
+            batch_file_count = len(batch_files)
+            
+            print(f"\n[BATCH {batch_idx+1}/{len(batches)}] Processing: {batch_name} ({batch_file_count} files)")
+            _add_debug_log('INFO', 'BATCH', f'Processing batch {batch_idx+1}/{len(batches)}: {batch_name}', {
+                'files': [f["path"] for f in batch_files]
+            })
+            
+            if progress_callback:
+                progress_callback(f"🔨 Generating batch {batch_idx+1}/{len(batches)}: {batch_name} ({batch_file_count} files)...")
+            
+            # Build batch-specific prompt
+            prompt = get_batch_code_generation_prompt(
+                plan=plan,
+                batch_files=batch_files,
+                batch_index=batch_idx,
+                total_batches=len(batches),
+                batch_name=batch_name,
+                all_file_paths=all_file_paths,
+                previously_generated_summaries=previously_generated_summaries,
+                memory_context=memory_context if batch_idx == 0 else "",  # Memory only for first batch
+            )
+            
+            # Call Gemini for this batch
+            print(f"[BATCH {batch_idx+1}] Prompt size: {len(prompt):,} chars")
+            _add_debug_log('DEBUG', 'BATCH', f'Batch {batch_idx+1} prompt size: {len(prompt):,} chars', {})
+            
+            try:
+                response = self._call_gemini(prompt, model=self.coder_model)
+            except GeminiAPIError as api_err:
+                print(f"[BATCH {batch_idx+1}] ❌ Gemini API error: {api_err}")
+                _add_debug_log('ERROR', 'BATCH', f'Batch {batch_idx+1} API error: {str(api_err)[:200]}', {})
+                if batch_idx == 0 and len(batches) == 1:
+                    # Single batch and it failed — re-raise
+                    raise
+                # Multi-batch: skip this batch, wait extra time, continue
+                if progress_callback:
+                    progress_callback(f"⚠️ Batch {batch_idx+1} API error — waiting 10s before retry...")
+                time.sleep(10)
+                continue
+            
+            if "[ERROR]" in response:
+                print(f"[BATCH {batch_idx+1}] ❌ Gemini error: {response[:200]}")
+                _add_debug_log('ERROR', 'BATCH', f'Batch {batch_idx+1} failed: {response[:200]}', {})
+                # Continue with remaining batches - don't fail everything
+                continue
+            
+            # Parse generated files from response (robust multi-strategy parser)
+            batch_generated = self._parse_files_from_response(response)
+            
+            print(f"[BATCH {batch_idx+1}] ✅ Generated {len(batch_generated)}/{batch_file_count} files")
+            _add_debug_log('INFO', 'BATCH', f'Batch {batch_idx+1} generated {len(batch_generated)} files', {
+                'expected': batch_file_count,
+                'generated_paths': [f["filename"] for f in batch_generated]
+            })
+            
+            all_generated_files.extend(batch_generated)
+            
+            # Extract summaries for next batch's context
+            if batch_generated:
+                batch_summary = extract_batch_summary(batch_generated)
+                previously_generated_summaries += f"\n\n=== Batch {batch_idx+1}: {batch_name} ===\n{batch_summary}"
+            
+            # Rate limit protection: wait between batches
+            # Gemini 3 Flash = 1K RPM, so 3s is plenty of headroom
+            if batch_idx < len(batches) - 1:
+                wait_time = 3
+                print(f"[BATCH] ⏳ Waiting {wait_time}s before next batch (rate limit protection)...")
+                _add_debug_log('INFO', 'BATCH', f'Rate limit cooldown: {wait_time}s', {})
+                if progress_callback:
+                    progress_callback(f"⏳ Cooldown: {wait_time}s before next batch...")
+                time.sleep(wait_time)
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # MISSING FILE RECOVERY - Detect and regenerate any files that
+        # were expected but not generated across all batches
+        # ═══════════════════════════════════════════════════════════════════
+        generated_paths = set(f["filename"] for f in all_generated_files)
+        expected_paths = set(f["path"] for f in files)
+        missing_paths = expected_paths - generated_paths
+        
+        # Also check for path variations (with/without leading directories)
+        still_missing = set()
+        for mp in missing_paths:
+            # Check if a generated file matches by basename
+            mp_base = os.path.basename(mp)
+            found = False
+            for gp in generated_paths:
+                if os.path.basename(gp) == mp_base:
+                    found = True
+                    break
+            if not found:
+                still_missing.add(mp)
+        
+        if still_missing and len(still_missing) <= 15:
+            print(f"\n[RECOVERY] {len(still_missing)} files missing after batch generation. Attempting recovery...")
+            _add_debug_log('WARNING', 'RECOVERY', f'{len(still_missing)} missing files detected', {
+                'missing': list(still_missing)
+            })
+            
+            if progress_callback:
+                progress_callback(f"🔄 Recovering {len(still_missing)} missing files...")
+            
+            # Build a mini-batch with just the missing files
+            missing_file_dicts = [f for f in files if f["path"] in still_missing]
+            
+            if missing_file_dicts:
+                recovery_prompt = get_batch_code_generation_prompt(
+                    plan=plan,
+                    batch_files=missing_file_dicts,
+                    batch_index=len(batches),
+                    total_batches=len(batches) + 1,
+                    batch_name="Recovery - Missing Files",
+                    all_file_paths=all_file_paths,
+                    previously_generated_summaries=previously_generated_summaries,
+                    memory_context="",
+                )
+                
+                time.sleep(3)  # Rate limit pause
+                try:
+                    recovery_response = self._call_gemini(recovery_prompt, model=self.coder_model)
+                except GeminiAPIError:
+                    print(f"[RECOVERY] ❌ Recovery Gemini API call failed (all models exhausted)")
+                    recovery_response = None
+                
+                if recovery_response and "[ERROR]" not in recovery_response:
+                    recovered_files = self._parse_files_from_response(recovery_response)
+                    if recovered_files:
+                        all_generated_files.extend(recovered_files)
+                        print(f"[RECOVERY] ✅ Recovered {len(recovered_files)} additional files")
+                        _add_debug_log('INFO', 'RECOVERY', f'Recovered {len(recovered_files)} files', {
+                            'recovered_paths': [f["filename"] for f in recovered_files]
+                        })
+                    else:
+                        print(f"[RECOVERY] ⚠️ Recovery call returned no parseable files")
+                else:
+                    print(f"[RECOVERY] ❌ Recovery Gemini call failed")
+        elif still_missing:
+            print(f"[RECOVERY] ⚠️ {len(still_missing)} files missing but too many for single recovery call")
+            _add_debug_log('WARNING', 'RECOVERY', f'Too many missing files for recovery: {len(still_missing)}', {})
+        
+        print(f"\n{'='*70}")
+        print(f"[BATCH] FINAL: Generated {len(all_generated_files)}/{total_files} files across {len(batches)} batches")
+        print(f"{'='*70}\n")
+        
+        _add_debug_log('INFO', 'BATCH', f'Multi-batch complete: {len(all_generated_files)}/{total_files} files', {
+            'generated_paths': [f["filename"] for f in all_generated_files]
+        })
+        
+        if not all_generated_files:
+            raise Exception("BATCH GENERATION FAILED: No files were generated across all batches. The Gemini API may be overloaded — try again in a minute.")
+        
+        # Detect entrypoint and runtime
+        entrypoint, runtime = self._detect_entrypoint_and_runtime(all_generated_files)
+        print(f"[BATCH] Smart Detection: Runtime={runtime}, Entrypoint={entrypoint}")
+        
+        return {
+            "files": all_generated_files,
             "entrypoint": entrypoint,
             "runtime": runtime
         }
@@ -1097,13 +1993,21 @@ Output format: Plain text architectural plan with clear sections.
         deep_scan_result: Original repository scan result for dependency detection
         """
         if not E2B_AVAILABLE or not E2B_API_KEY:
+            logger.warning("E2B Sandbox not available (Dependencies or Key missing)")
+            _add_debug_log('WARNING', 'SANDBOX', 'E2B not available', {})
             return "E2B Sandbox not available (Dependencies or Key missing)."
             
         # SAFETY CHECK: Did Code Gen Fail?
         if entrypoint == "error.log":
             return f"GENERATION FAILED: Gemini API returned an error.\n\n=== ERROR LOG ===\n{files[0]['content']}\n================="
 
-        print(f"[*] Executing {entrypoint} in E2B Sandbox (Runtime: {runtime})...")
+        logger.info(f"📦 Sandbox execution starting: {entrypoint} | Runtime: {runtime} | Files: {len(files)}")
+        _add_debug_log('INFO', 'SANDBOX', f'Execution starting', {
+            'entrypoint': entrypoint,
+            'runtime': runtime,
+            'file_count': len(files),
+            'file_list': [f['filename'] for f in files],
+        })
         
         try:
             # AGGRESSIVE CLEANUP: Kill previous sandbox if exists
@@ -1120,10 +2024,24 @@ Output format: Plain text architectural plan with clear sections.
             # Create NEW Sandbox (Persistent) defined by self.sandbox
             # Timeout set to 1800s (30m) to allow user to explore preview
             print("[*] Creating new E2B Sandbox (30min timeout)...")
-            self.sandbox = Sandbox.create(timeout=1800)
-            print(f"[*] Sandbox created successfully. ID: {self.sandbox.id if hasattr(self.sandbox, 'id') else 'N/A'}")
+            try:
+                self.sandbox = Sandbox.create(timeout=1800)
+                print(f"[*] Sandbox created successfully. ID: {self.sandbox.id if hasattr(self.sandbox, 'id') else 'N/A'}")
+            except Exception as sandbox_create_err:
+                error_msg = str(sandbox_create_err)
+                print(f"[!] Sandbox creation failed: {error_msg}")
+                _add_debug_log('ERROR', 'SANDBOX', f'Creation failed: {error_msg}', {})
+                # Retry once after a brief pause
+                time.sleep(3)
+                try:
+                    self.sandbox = Sandbox.create(timeout=1800)
+                    print(f"[*] Sandbox created on retry. ID: {self.sandbox.id if hasattr(self.sandbox, 'id') else 'N/A'}")
+                except Exception as retry_err:
+                    return f"Sandbox Error: Failed to create sandbox after retry: {retry_err}"
             
             # Write ALL files (with path sanitization for bash compatibility)
+            files_written = 0
+            files_failed = 0
             for file in files:
                 # Sanitize the filename to prevent bash shell issues
                 safe_filename = sanitize_path(file['filename'])
@@ -1147,8 +2065,15 @@ Output format: Plain text architectural plan with clear sections.
                 
                 try:
                     self.sandbox.files.write(safe_filename, file['content'])
+                    files_written += 1
                 except Exception as write_err:
+                    files_failed += 1
                     print(f"  [!] File write error for {safe_filename}: {write_err}")
+            
+            print(f"[*] Files written: {files_written}/{len(files)} ({files_failed} failed)")
+            _add_debug_log('INFO', 'SANDBOX', f'Files written: {files_written}/{len(files)}', {
+                'failed': files_failed
+            })
             
             # Install Dependencies Based on Runtime
             if runtime == "node" or entrypoint.endswith('.js'):
@@ -1549,17 +2474,35 @@ except Exception as e:
                             early_log = self.sandbox.files.read("app.log")
                             if early_log and len(early_log) > 10:
                                 print(f"[DEBUG] Early Log Check (Backend may have crashed):\n{early_log[:300]}")
+                                # Check for Python crash indicators
+                                crash_indicators = ["SyntaxError", "ImportError", "ModuleNotFoundError", 
+                                                   "NameError", "IndentationError", "AttributeError: module"]
+                                if any(indicator in early_log for indicator in crash_indicators):
+                                    print("[!] PYTHON ERROR DETECTED - Breaking health check loop early")
+                                    log_content = early_log
+                                    break  # Exit health check loop immediately
                         except:
                             pass
 
                 if not backend_success:
                     print("[!] Backend FAILED to start. Retrieving logs...")
-                    try:
-                        log_content = self.sandbox.files.read("app.log")
-                        print(f"[DEBUG] App Log Preview:\n{log_content[:500]}")
-                    except:
-                        log_content = "Could not read app.log"
-                    return f"FATAL: Backend failed to start after 60 seconds.\\n\\n=== APP.LOG ===\\n{log_content}\\n==============="
+                    
+                    # Check if log_content was already read in early check (from break)
+                    if 'log_content' not in locals():
+                        try:
+                            log_content = self.sandbox.files.read("app.log")
+                            print(f"[DEBUG] App Log (First 1000 chars):\n{log_content[:1000]}")
+                        except:
+                            log_content = "Could not read app.log"
+                    else:
+                        print(f"[DEBUG] Using early log check data ({len(log_content)} bytes)")
+                    
+                    # Also capture any Python syntax errors
+                    if "SyntaxError" in log_content or "ImportError" in log_content or "ModuleNotFoundError" in log_content:
+                        print("[!] DETECTED CODE ERROR - Will trigger auto-regeneration")
+                    
+                    # Return with clear error marker for auto-retry
+                    return f"BACKEND_CRASH: {log_content[:800]}"
 
                 # Get Backend URL
                 backend_host = self.sandbox.get_host(8000)
@@ -1567,10 +2510,24 @@ except Exception as e:
                 print(f"[*] Backend Live at: {backend_url}")
 
                 # --- PHASE 2: FRONTEND LAUNCH (Dual Stack) ---
-                # Check if we have a frontend package.json
-                has_frontend = any("frontend/package.json" in f['filename'] for f in files)
+                # Check for frontend: Next.js (package.json) OR static files (index.html)
+                # Detect BOTH frontend/ directory structure AND root-level frontend files
+                has_next_frontend = any("frontend/package.json" in f['filename'] for f in files)
+                has_static_frontend_in_dir = any("frontend/index.html" in f['filename'] for f in files)
+                has_static_frontend_root = any(f['filename'] == "index.html" or f['filename'].endswith("/index.html") and "frontend" not in f['filename'] for f in files)
                 
-                if has_frontend:
+                # Combine: frontend detected if EITHER in frontend/ dir OR at root
+                has_static_frontend = has_static_frontend_in_dir or has_static_frontend_root
+                
+                # Determine frontend directory
+                if has_static_frontend_in_dir:
+                    frontend_dir = "frontend"
+                elif has_static_frontend_root:
+                    frontend_dir = "."  # Serve from root
+                else:
+                    frontend_dir = None
+                
+                if has_next_frontend:
                     print("🚀 Detected Frontend. Initiating Dual-Stack Launch...")
                     frontend_dir = "modernized_stack/frontend"
                     
@@ -1611,6 +2568,65 @@ except Exception as e:
                     
                     return f"Dual-Stack Deployed Successfully.\\n[PREVIEW_URL] {frontend_url}\\n[BACKEND_URL] {backend_url}"
                 
+                elif has_static_frontend:
+                    # Static Frontend (HTML/CSS/JS) - Serve with Python http.server
+                    if has_static_frontend_in_dir:
+                        print("🎨 Detected Static Frontend (HTML/CSS/JS in frontend/ directory)...")
+                    else:
+                        print("🎨 Detected Static Frontend (HTML/CSS/JS at root level)...")
+                    
+                    # Verify files exist before starting server
+                    try:
+                        ls_result = self.sandbox.commands.run("ls -la /home/user/*.html /home/user/*.css /home/user/*.js 2>/dev/null | head -10")
+                        print(f"[DEBUG] Frontend files in /home/user:\n{ls_result.stdout}")
+                    except:
+                        pass
+                    
+                    print(f"[*] Serving static files from: {frontend_dir}/")
+                    print(f"[*] Backend APIs remain on: {backend_url}")
+                    
+                    # Start simple HTTP server on port 3000
+                    # CRITICAL: E2B writes files to /home/user/, so explicitly cd there
+                    if frontend_dir == ".":
+                        # Root level - serve from /home/user where files are written
+                        self.sandbox.commands.run(f"cd /home/user && python -m http.server 3000 > /home/user/frontend.log 2>&1", background=True)
+                    else:
+                        # frontend/ directory
+                        self.sandbox.commands.run(f"cd /home/user/{frontend_dir} && python -m http.server 3000 > /home/user/frontend.log 2>&1", background=True)
+                    
+                    time.sleep(3)  # Give server time to start
+                    frontend_host = self.sandbox.get_host(3000)
+                    frontend_url = f"https://{frontend_host}"
+                    
+                    # Verify frontend server is actually responding
+                    try:
+                        check_script = """
+import urllib.request
+try:
+    response = urllib.request.urlopen('http://127.0.0.1:3000', timeout=2)
+    print('OK')
+except Exception as e:
+    print(f'ERROR: {e}')
+"""
+                        check = self.sandbox.commands.run(f"python -c \"{check_script}\"")
+                        if 'OK' in check.stdout:
+                            print(f"[*] Frontend Health Check: SUCCESS ✓")
+                        else:
+                            print(f"[!] Frontend Health Check FAILED: {check.stdout.strip()}")
+                            # Try to get error logs
+                            try:
+                                frontend_log = self.sandbox.files.read("/home/user/frontend.log")
+                                print(f"[DEBUG] Frontend Log: {frontend_log[:300]}")
+                            except:
+                                pass
+                    except Exception as e:
+                        print(f"[!] Frontend health check exception: {str(e)[:100]}")
+                    
+                    print(f"[*] 🎨 Frontend Live at: {frontend_url}")
+                    print(f"[*] 🔌 Backend APIs at: {backend_url}")
+                    
+                    return f"Dual-Stack Deployed Successfully.\n[PREVIEW_URL] {frontend_url}\n[BACKEND_URL] {backend_url}"
+                
                 else:
                     # Single Stack (Backend Only)
                     return f"Backend Server started.\n[PREVIEW_URL] {backend_url}"
@@ -1633,9 +2649,13 @@ except Exception as e:
         
         def emit_log(msg):
             logs.append(msg)
+            logger.info(f"   ➡ {msg}")
+            _add_debug_log('INFO', 'RESURRECT', msg, {})
             return {"type": "log", "content": msg}
 
         def emit_debug(msg):
+            logger.debug(f"   🔍 {msg[:200]}")
+            _add_debug_log('DEBUG', 'RESURRECT_DEBUG', msg[:500], {})
             return {"type": "debug", "content": msg}
 
         # Record resurrection attempt start in memory
@@ -1684,42 +2704,55 @@ except Exception as e:
         yield emit_log("🏗️ Architecting Enhanced Blueprint (Preserving Core Logic)...")
 
         # 2. Code Gen with COMPREHENSIVE Auto-Healing Loop
-        MAX_RETRIES = 3  # Increased from 2
+        MAX_RETRIES = 3
         retry_count = 0
         sandbox_logs = None
         files = []
         entrypoint = 'modernized_stack/backend/main.py'
         all_errors = []  # Track all errors for context accumulation
         
+        # Progress callback for batch processing - collects messages to yield
+        batch_progress_messages = []
+        def batch_progress(msg):
+            batch_progress_messages.append(msg)
+        
         while retry_count <= MAX_RETRIES:
             try:
+                batch_progress_messages.clear()
+                
                 if retry_count > 0:
                     yield emit_log(f"🔧 Auto-Healing: Regenerating code (Attempt {retry_count + 1}/{MAX_RETRIES + 1})...")
                     
                     # Build comprehensive error context for AI
                     error_context = self._build_error_context(all_errors)
                     plan_with_error = plan + error_context
-                    # Pass deep_scan_result for preservation context
-                    code_data = self.generate_code(plan_with_error, deep_scan_result, repo_url)
+                    code_data = self.generate_code_batched(plan_with_error, deep_scan_result, repo_url, progress_callback=batch_progress)
                 else:
-                    yield emit_log("🔨 Synthesizing Enhanced Infrastructure (Preserving Core Logic)...")
-                    # Pass deep_scan_result for preservation context
-                    code_data = self.generate_code(plan, deep_scan_result, repo_url)
+                    yield emit_log("🔨 Synthesizing Enhanced Infrastructure (Multi-Batch Engine v7.0)...")
+                    code_data = self.generate_code_batched(plan, deep_scan_result, repo_url, progress_callback=batch_progress)
+                
+                # Emit any batch progress messages
+                for msg in batch_progress_messages:
+                    yield emit_log(msg)
                 
                 files = code_data.get('files', [])
                 entrypoint = code_data.get('entrypoint', 'modernized_stack/backend/main.py')
-                runtime = code_data.get('runtime', 'python')  # NEW: Get runtime from code_data
+                runtime = code_data.get('runtime', 'python')
                 
                 # Validate generated files
                 if not files:
                     raise Exception("CODE GENERATION FAILED: No files were generated")
+                
+                # Reject error.log sentinel if it somehow slipped through
+                if len(files) == 1 and files[0].get('filename') == 'error.log':
+                    raise Exception(f"CODE GENERATION FAILED: Only error.log produced. Content: {files[0].get('content', '')[:200]}")
                 
                 encoded_files = [f['filename'] for f in files]
                 yield emit_debug(f"[DEBUG] Generated Files: {', '.join(encoded_files)}")
                 yield emit_log(f"Generated {len(encoded_files)} System Modules...")
                 yield emit_log(f"📦 Detected Runtime: {runtime.upper()} | Entrypoint: {entrypoint}")
                 
-                # 3. Execution (Pass runtime for Node.js vs Python handling)
+                # 3. Execution
                 yield emit_log("Booting Neural Sandbox Environment...")
                 sandbox_logs = self.execute_in_sandbox(files, entrypoint, runtime, deep_scan_result)
                 yield emit_debug(f"[DEBUG] Sandbox Output:\n{sandbox_logs}")
@@ -1739,6 +2772,7 @@ except Exception as e:
                         retry_count += 1
                         continue  # Retry
                     else:
+                        error_context = self._build_error_context(all_errors)
                         record_failure(repo_url, error_type, error_context[:200], f"Attempt {retry_count + 1}")
                         yield emit_log(f"❌ Auto-Heal Failed after {MAX_RETRIES + 1} attempts. Proceeding with partial result.")
                         break
@@ -1746,6 +2780,28 @@ except Exception as e:
                     # Success!
                     record_success(repo_url, decisions=["Resurrection completed successfully"], patterns_used=[f"Runtime: {runtime}", f"Entrypoint: {entrypoint}"])
                     yield emit_log("✅ Verifying System Integrity... All checks passed!")
+                    break
+                    
+            except GeminiAPIError as api_error:
+                # API is completely down — wait longer before retry
+                error_str = str(api_error)
+                all_errors.append({
+                    "attempt": retry_count + 1,
+                    "type": "GEMINI_API_DOWN",
+                    "message": error_str
+                })
+                
+                if retry_count < MAX_RETRIES:
+                    wait_secs = 15 * (retry_count + 1)  # 15s, 30s, 45s
+                    yield emit_log(f"⚠️ Gemini API unavailable. Waiting {wait_secs}s before retry {retry_count + 2}/{MAX_RETRIES + 1}...")
+                    time.sleep(wait_secs)
+                    retry_count += 1
+                    sandbox_logs = f"GEMINI_API_ERROR: {error_str}"
+                    continue
+                else:
+                    record_failure(repo_url, "GEMINI_API_DOWN", error_str[:200], "Max retries exceeded")
+                    yield emit_log(f"❌ Gemini API is unreachable after {MAX_RETRIES + 1} attempts. Please check your API key and quota at https://aistudio.google.com/")
+                    sandbox_logs = f"FATAL: Gemini API unreachable: {error_str}"
                     break
                     
             except Exception as loop_error:
@@ -1757,13 +2813,14 @@ except Exception as e:
                 })
                 
                 if retry_count < MAX_RETRIES:
-                    yield emit_log(f"⚠️ Exception caught: {error_str[:100]}... Retrying...")
+                    yield emit_log(f"⚠️ Exception caught: {error_str[:150]}. Retrying...")
                     retry_count += 1
                     sandbox_logs = f"EXCEPTION: {error_str}"
+                    time.sleep(3)  # Brief pause before code-level retry
                     continue
                 else:
                     record_failure(repo_url, "EXCEPTION", error_str[:200], "Max retries exceeded")
-                    yield emit_log(f"❌ Max retries exceeded. Error: {error_str[:100]}")
+                    yield emit_log(f"❌ Max retries exceeded. Error: {error_str[:150]}")
                     sandbox_logs = f"FATAL ERROR: {error_str}"
                     break
         
@@ -1831,6 +2888,7 @@ except Exception as e:
             (r"Error: ENOENT", "NODE_FILE_NOT_FOUND"),
             
             # Server Failures
+            (r"BACKEND_CRASH:", "BACKEND_CRASH"),  # Explicit crash marker
             (r"FATAL: Node\.js Backend failed", "NODE_SERVER_CRASH"),
             (r"FATAL: Backend failed", "BACKEND_CRASH"),
             (r"Backend failed to start", "BACKEND_STARTUP_FAILED"),
@@ -1903,20 +2961,46 @@ except Exception as e:
         context += """
 ### COMMON FIXES TO APPLY:
 
-1. **TYPESCRIPT ERRORS**: Use `string` not `str`, `number` not `int`, `boolean` not `bool`
-2. **MODULE NOT FOUND**: Check import paths, ensure all dependencies in package.json
-3. **SYNTAX ERRORS**: Check for missing brackets, semicolons, proper JSX syntax
-4. **BASH/PATH ERRORS**: NO parentheses (), brackets [], spaces in file paths!
-5. **BUILD ERRORS**: Ensure next.config.mjs (not .ts), all config files present
-6. **PYTHON ERRORS**: Check imports, ensure all packages in requirements.txt
-7. **CORS ERRORS**: Backend must have CORS middleware with allow_origins=["*"]
+1. **BACKEND_CRASH or "Backend failed to start"**:
+   - Check the app.log for the real error (imports, syntax, port conflicts)
+   - **CRITICAL**: FastAPI/Uvicorn MUST run on **PORT 8000** (not 5000, 3000, or any other port!)
+   - Correct: `uvicorn.run(app, host="0.0.0.0", port=8000)`
+   - Correct: `if __name__ == "__main__": uvicorn.run("api:app", host="0.0.0.0", port=8000)`
+   - Flask: `app.run(host="0.0.0.0", port=8000)` 
+   - The sandbox health check expects port 8000 — any other port will fail!
 
-### CRITICAL REMINDERS:
+2. **NODE_INTERNAL_ERROR with 'document is not defined'**: 
+   - You generated CLIENT-SIDE JavaScript (browser code) but it's being run as a Node.js server
+   - SOLUTION: Create a SEPARATE backend server file (backend/server.js or backend/api.py)
+   - Frontend files (HTML/CSS/JS) should be in frontend/ directory
+   - The server should serve static files, NOT contain browser code like `document.addEventListener`
+   - If migrating Flask → FastAPI, the entrypoint MUST be a Python file, not frontend JavaScript!
+
+3. **TYPESCRIPT ERRORS**: Use `string` not `str`, `number` not `int`, `boolean` not `bool`
+
+4. **MODULE NOT FOUND**: Check import paths, ensure all dependencies in package.json or requirements.txt
+
+5. **SYNTAX ERRORS**: Check for missing brackets, semicolons, proper JSX syntax
+
+6. **BASH/PATH ERRORS**: NO parentheses (), brackets [], spaces in file paths!
+
+7. **BUILD ERRORS**: Ensure next.config.mjs (not .ts), all config files present
+
+8. **PYTHON ERRORS**: Check imports, ensure all packages in requirements.txt
+
+9. **CORS ERRORS**: Backend must have CORS middleware with allow_origins=["*"]
+
+### CRITICAL REMINDERS FOR ARCHITECTURE:
+- **Flask → FastAPI migration**: Create backend/main.py or backend/api.py as the server entrypoint
+- **PORT REQUIREMENT**: Backend server MUST listen on port 8000 (not 5000, 3000, or any other port!)
+- **Node.js full-stack**: Backend server in backend/server.js (port 8000), frontend static files in frontend/
+- **Static sites**: Frontend in frontend/, no server needed — use Python SimpleHTTPServer fallback
+- Client-side JS goes in frontend/, server-side code in backend/
 - Use ONLY alphanumeric, hyphens, underscores in file paths
+- Backend must have health check at GET / or GET /health
 - layout.tsx MUST import './globals.css'
 - globals.css MUST start with @tailwind directives
 - next.config.mjs NOT next.config.ts
-- Backend must have health check at GET /
 - All TypeScript files need 'use client' for interactive components
 
 FIX ALL ISSUES AND REGENERATE COMPLETE, WORKING CODE.
