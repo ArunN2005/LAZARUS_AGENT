@@ -1,17 +1,28 @@
 'use client';
 
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   Play, GitPullRequest, CheckCircle, Cpu, ShieldAlert,
-  Sun, Moon, FolderTree, Terminal as TerminalIcon, Eye,
-  Loader2, AlertCircle, Search,
+  FolderTree, Terminal as TerminalIcon, Eye,
+  Loader2, AlertCircle, Search, ArrowRight, Zap,
+  BarChart3,
 } from 'lucide-react';
 import FileTree, { FileEntry } from './components/FileTree';
 import SyntaxHighlighter from './components/SyntaxHighlighter';
+import Logo3D from './components/Logo3D';
+import AnalysisPanel from './components/AnalysisPanel';
+import PlanningPanel from './components/PlanningPanel';
+import ReviewPanel from './components/ReviewPanel';
 
 type Artifact = { filename: string; content: string };
 
+type Phase = 'logo' | 'input' | 'analyzing' | 'analysis' | 'planning' | 'building' | 'results';
+
 export default function Home() {
+  // ── Phase control ──────────────────────────────────────────────
+  const [phase, setPhase] = useState<Phase>('logo');
+
+  // ── Core state ─────────────────────────────────────────────────
   const [repoUrl, setRepoUrl] = useState('');
   const [instructions, setInstructions] = useState('');
   const [logs, setLogs] = useState<string[]>([]);
@@ -29,20 +40,28 @@ export default function Home() {
   const [scanError, setScanError] = useState<string | null>(null);
   const [hasScanned, setHasScanned] = useState(false);
 
-  // Right panel tabs
   const [rightTab, setRightTab] = useState<'code' | 'terminal' | 'preview'>('code');
 
-  // Cache for fetched file contents (existing repo files)
   const [fileContentCache, setFileContentCache] = useState<Record<string, string>>({});
   const [isFetchingFile, setIsFetchingFile] = useState(false);
+  const fetchedFilesRef = useRef<Set<string>>(new Set());
 
-  const [isDarkMode] = useState(true);
+  // ── Analysis state ─────────────────────────────────────────────
+  const [analysisData, setAnalysisData] = useState<any>(null);
+  const [analysisLogs, setAnalysisLogs] = useState<string[]>([]);
+
+  // ── Build result state ─────────────────────────────────────────
+  const [buildStatus, setBuildStatus] = useState('');
+  const [buildRetryCount, setBuildRetryCount] = useState(0);
+  const [buildErrors, setBuildErrors] = useState<{ attempt: number; type: string; message: string }[]>([]);
+  const [iterationCount, setIterationCount] = useState(0);
 
   useEffect(() => { document.documentElement.classList.add('dark'); }, []);
 
-  // ── SCAN REPO ──────────────────────────────────────────────────
-  const scanRepo = useCallback(async () => {
+  // ── SCAN + ANALYZE (no instructions asked) ─────────────────────
+  const scanAndAnalyze = useCallback(async () => {
     if (!repoUrl) return;
+    setPhase('analyzing');
     setIsScanning(true);
     setScanError(null);
     setRepoFiles([]);
@@ -50,37 +69,94 @@ export default function Home() {
     setArtifacts([]);
     setSelectedFile(null);
     setFileContentCache({});
+    fetchedFilesRef.current.clear();
+    setAnalysisData(null);
+    setAnalysisLogs([]);
 
     try {
-      const resp = await fetch(`http://localhost:8000/api/scan?repo_url=${encodeURIComponent(repoUrl)}`);
-      if (!resp.ok) throw new Error(`Scan failed: ${resp.statusText}`);
-      const data = await resp.json();
-      if (data.error) throw new Error(data.error);
-      setRepoFiles(data.files || []);
-      setHasScanned(true);
+      const response = await fetch(`http://localhost:8000/api/analyze?repo_url=${encodeURIComponent(repoUrl)}`);
+      if (!response.ok) throw new Error(`Analysis failed: ${response.statusText}`);
+
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+      if (!reader) throw new Error('No stream');
+
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        for (let i = 0; i < lines.length - 1; i++) {
+          const line = lines[i].trim();
+          if (!line) continue;
+          try {
+            const chunk = JSON.parse(line);
+            if (chunk.type === 'log') {
+              setAnalysisLogs(prev => [...prev, chunk.content]);
+            } else if (chunk.type === 'files') {
+              setRepoFiles(chunk.data || []);
+              setHasScanned(true);
+            } else if (chunk.type === 'analysis') {
+              setAnalysisData(chunk.data);
+              setPhase('analysis');
+            } else if (chunk.type === 'error') {
+              setScanError(chunk.content || 'Analysis failed');
+              setPhase('input');
+            }
+          } catch { /* skip bad lines */ }
+        }
+        buffer = lines[lines.length - 1];
+      }
     } catch (e: any) {
-      setScanError(e.message || 'Scan failed');
+      setScanError(e.message || 'Analysis failed');
+      setPhase('input');
     } finally {
       setIsScanning(false);
     }
   }, [repoUrl]);
 
-  // ── INITIALIZE PROTOCOL ────────────────────────────────────────
-  const initializeProtocol = async () => {
+  // ── START BUILD (called from PlanningPanel) ────────────────────
+  const startBuild = useCallback(async (
+    selectedDrawbacks: string[],
+    selectedRecs: string[],
+    userInstructions: string,
+  ) => {
     if (!repoUrl) return;
+
+    // Build combined instructions from the planning phase
+    const parts: string[] = [];
+    if (selectedDrawbacks.length > 0) {
+      parts.push(`FIX THESE ISSUES:\n${selectedDrawbacks.map(d => `- ${d}`).join('\n')}`);
+    }
+    if (selectedRecs.length > 0) {
+      parts.push(`APPLY THESE UPGRADES:\n${selectedRecs.map(r => `- ${r}`).join('\n')}`);
+    }
+    if (userInstructions) {
+      parts.push(`SPECIFIC INSTRUCTIONS:\n${userInstructions}`);
+    }
+    const combinedInstructions = parts.join('\n\n');
+    setInstructions(combinedInstructions);
+
+    // Start building
+    setPhase('building');
     setIsLoading(true);
-    setLogs(['[*] Connecting to Lazarus Engine...']);
+    setLogs([`[*] Iteration ${iterationCount + 1} — Connecting to Lazarus Engine...`]);
     setArtifacts([]);
     setSelectedFile(null);
     setPreview('');
     setDeployStatus(null);
+    setBuildStatus('');
+    setBuildRetryCount(0);
+    setBuildErrors([]);
     setRightTab('terminal');
 
     try {
       const response = await fetch('http://localhost:8000/api/resurrect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ repo_url: repoUrl, vibe_instructions: instructions }),
+        body: JSON.stringify({ repo_url: repoUrl, vibe_instructions: combinedInstructions }),
       });
       if (!response.ok) throw new Error(`Failed: ${response.statusText}`);
 
@@ -110,22 +186,35 @@ export default function Home() {
               const res = chunk.data;
               setArtifacts(res.artifacts || []);
               setPreview(res.preview || '');
+              setBuildStatus(res.status || 'Unknown');
+              setBuildRetryCount(res.retry_count || 0);
+              setBuildErrors(res.errors || []);
               if (res.artifacts?.length) {
                 setSelectedFile(res.artifacts[0].filename);
                 setRightTab('code');
               }
               if (res.preview) setRightTab('preview');
               setIsLoading(false);
+              setIterationCount(prev => prev + 1);
+              setPhase('results');
             }
           } catch { /* skip */ }
         }
         buffer = lines[lines.length - 1];
       }
+      setIsLoading(false);
+      if (phase === 'building') setPhase('results');
     } catch (error) {
       setLogs(prev => [...prev, `[ERROR] ${error}`]);
       setIsLoading(false);
     }
-  };
+  }, [repoUrl, iterationCount, phase]);
+
+  // ── REFINE (called from ReviewPanel) ───────────────────────────
+  const handleRefine = useCallback((feedback: string) => {
+    // Re-run build with the feedback appended
+    startBuild([], [], `${instructions}\n\nUSER FEEDBACK FROM PREVIOUS BUILD:\n${feedback}`);
+  }, [instructions, startBuild]);
 
   // ── DEPLOY ─────────────────────────────────────────────────────
   const deployCode = async () => {
@@ -165,92 +254,285 @@ export default function Home() {
     return entries;
   }, [repoFiles, artifacts]);
 
-  const selectedContent = artifacts.find(a => a.filename === selectedFile)?.content || '';
-
-  // Fetch content for existing repo files when selected
+  // ── Fetch content for existing repo files ──────────────────────
   useEffect(() => {
     if (!selectedFile || !repoUrl) return;
-    // If it's an artifact (modified file), content already available
     if (artifacts.find(a => a.filename === selectedFile)) return;
-    // If already cached, no need to fetch
-    if (fileContentCache[selectedFile]) return;
+    if (fetchedFilesRef.current.has(selectedFile)) return;
 
-    const fetchContent = async () => {
-      setIsFetchingFile(true);
-      try {
-        const resp = await fetch(
-          `http://localhost:8000/api/file-content?repo_url=${encodeURIComponent(repoUrl)}&path=${encodeURIComponent(selectedFile)}`
-        );
-        if (!resp.ok) throw new Error('Failed to fetch');
-        const data = await resp.json();
-        if (data.content) {
-          setFileContentCache(prev => ({ ...prev, [selectedFile]: data.content }));
+    fetchedFilesRef.current.add(selectedFile);
+    setIsFetchingFile(true);
+
+    const controller = new AbortController();
+
+    fetch(
+      `http://localhost:8000/api/file-content?repo_url=${encodeURIComponent(repoUrl)}&path=${encodeURIComponent(selectedFile)}`,
+      { signal: controller.signal }
+    )
+      .then(resp => {
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        return resp.json();
+      })
+      .then(data => {
+        setFileContentCache(prev => ({
+          ...prev,
+          [selectedFile]: data.content || `// Empty file: ${selectedFile}`,
+        }));
+      })
+      .catch(e => {
+        if (e.name !== 'AbortError') {
+          console.error('Failed to fetch file content:', e);
+          setFileContentCache(prev => ({
+            ...prev,
+            [selectedFile]: `// Error loading file: ${selectedFile}\n// ${e.message}`,
+          }));
         }
-      } catch (e) {
-        console.error('Failed to fetch file content:', e);
-        setFileContentCache(prev => ({ ...prev, [selectedFile]: `// Error loading file: ${selectedFile}` }));
-      } finally {
+      })
+      .finally(() => {
         setIsFetchingFile(false);
-      }
-    };
-    fetchContent();
-  }, [selectedFile, repoUrl, artifacts, fileContentCache]);
+      });
 
-  // Resolved content: artifact content > cached content
+    return () => controller.abort();
+  }, [selectedFile, repoUrl, artifacts]);
+
   const displayContent = selectedFile
     ? artifacts.find(a => a.filename === selectedFile)?.content || fileContentCache[selectedFile] || ''
     : '';
 
-  // ── RENDER ─────────────────────────────────────────────────────
+  // ══════════════════════════════════════════════════════════════
+  // PHASE 1: LOGO ANIMATION
+  // ══════════════════════════════════════════════════════════════
+  if (phase === 'logo') {
+    return <Logo3D onComplete={() => setPhase('input')} />;
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // PHASE 2: INPUT — Just repo URL, no instructions
+  // ══════════════════════════════════════════════════════════════
+  if (phase === 'input') {
+    return (
+      <div className="h-screen flex flex-col items-center justify-center bg-[#0a0a0a] text-white relative overflow-hidden">
+        <div className="absolute inset-0 opacity-5" style={{
+          backgroundImage: 'linear-gradient(rgba(57,255,20,0.5) 1px, transparent 1px), linear-gradient(90deg, rgba(57,255,20,0.5) 1px, transparent 1px)',
+          backgroundSize: '80px 80px',
+        }} />
+
+        <div className="relative z-10 flex flex-col items-center max-w-2xl w-full px-8">
+          <div className="mb-10 flex flex-col items-center">
+            <div className="flex items-center gap-3 mb-2">
+              <Cpu className="w-10 h-10 text-[#39ff14]" />
+              <h1 className="text-4xl font-black tracking-[0.2em] text-transparent bg-clip-text bg-gradient-to-r from-[#39ff14] via-[#007acc] to-[#c678dd]">
+                LAZARUS
+              </h1>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="h-px w-16 bg-gradient-to-r from-transparent to-[#39ff14]/50" />
+              <span className="text-[10px] tracking-[0.4em] text-[#39ff14]/60 uppercase">Resurrection Engine</span>
+              <div className="h-px w-16 bg-gradient-to-l from-transparent to-[#39ff14]/50" />
+            </div>
+          </div>
+
+          <div className="w-full space-y-4">
+            <div className="relative">
+              <input
+                type="text"
+                value={repoUrl}
+                onChange={e => setRepoUrl(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && scanAndAnalyze()}
+                placeholder="Paste your GitHub repository URL..."
+                className="w-full bg-[#1a1a1a] border border-[#333] rounded-xl px-5 py-4 text-lg text-white placeholder-[#555] focus:outline-none focus:border-[#39ff14]/50 focus:shadow-[0_0_20px_rgba(57,255,20,0.1)] transition-all"
+                autoFocus
+              />
+              {scanError && (
+                <p className="absolute -bottom-6 left-0 text-xs text-red-400 flex items-center gap-1">
+                  <AlertCircle className="w-3 h-3" /> {scanError}
+                </p>
+              )}
+            </div>
+
+            <button
+              onClick={scanAndAnalyze}
+              disabled={!repoUrl || isScanning}
+              className="w-full flex items-center justify-center gap-3 px-6 py-4 rounded-xl text-lg font-bold bg-gradient-to-r from-[#39ff14] to-[#22c55e] text-black hover:shadow-[0_0_40px_rgba(57,255,20,0.3)] disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+            >
+              {isScanning ? (
+                <><Loader2 className="w-5 h-5 animate-spin" /> Analyzing...</>
+              ) : (
+                <><Search className="w-5 h-5" /> Analyze Repository</>
+              )}
+            </button>
+
+            <p className="text-center text-[11px] text-[#555] mt-2">
+              We&apos;ll deeply analyze your project first &mdash; no changes until you decide.
+            </p>
+          </div>
+
+          <div className="flex gap-4 mt-10">
+            {[
+              { icon: BarChart3, label: 'Deep Analysis', color: '#007acc' },
+              { icon: Zap, label: 'AI-Powered', color: '#39ff14' },
+              { icon: ShieldAlert, label: 'You Decide', color: '#ff6b35' },
+            ].map(({ icon: Icon, label, color }) => (
+              <div key={label} className="flex items-center gap-2 text-[11px] tracking-wider" style={{ color }}>
+                <Icon className="w-4 h-4" />
+                {label}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // PHASE 3: ANALYZING — Loading with live logs
+  // ══════════════════════════════════════════════════════════════
+  if (phase === 'analyzing') {
+    return (
+      <div className="h-screen flex flex-col items-center justify-center bg-[#0a0a0a] text-white relative overflow-hidden">
+        <div className="absolute inset-0 opacity-5" style={{
+          backgroundImage: 'linear-gradient(rgba(0,122,204,0.5) 1px, transparent 1px), linear-gradient(90deg, rgba(0,122,204,0.5) 1px, transparent 1px)',
+          backgroundSize: '60px 60px',
+        }} />
+
+        <div className="relative z-10 flex flex-col items-center max-w-xl w-full px-8">
+          <div className="relative w-32 h-32 mb-8">
+            <div className="absolute inset-0 border-2 border-[#007acc]/30 rounded-full" />
+            <div className="absolute inset-3 border-2 border-[#007acc]/20 rounded-full" />
+            <div className="absolute inset-6 border-2 border-[#007acc]/10 rounded-full" />
+            <div className="absolute inset-0 rounded-full animate-spin" style={{ animationDuration: '3s' }}>
+              <div className="w-1/2 h-full origin-right" style={{
+                background: 'conic-gradient(from 0deg, transparent, rgba(0,122,204,0.4))',
+                borderRadius: '50% 0 0 50%',
+              }} />
+            </div>
+            <div className="absolute inset-0 flex items-center justify-center">
+              <BarChart3 className="w-8 h-8 text-[#007acc]" />
+            </div>
+          </div>
+
+          <h2 className="text-xl font-bold tracking-wider mb-2">DEEP ANALYSIS IN PROGRESS</h2>
+          <p className="text-sm text-[#666] mb-6">Scanning repository and detecting tech stack...</p>
+
+          <div className="w-full bg-[#1a1a1a] rounded-lg border border-[#333] p-4 max-h-60 overflow-auto">
+            {analysisLogs.map((log, i) => (
+              <div key={i} className="flex items-center gap-2 py-1">
+                {i === analysisLogs.length - 1 ? (
+                  <Loader2 className="w-3 h-3 animate-spin text-[#007acc] flex-shrink-0" />
+                ) : (
+                  <CheckCircle className="w-3 h-3 text-[#39ff14] flex-shrink-0" />
+                )}
+                <span className="text-xs text-[#888] font-mono">{log}</span>
+              </div>
+            ))}
+            {analysisLogs.length === 0 && (
+              <div className="flex items-center gap-2 py-1">
+                <Loader2 className="w-3 h-3 animate-spin text-[#007acc]" />
+                <span className="text-xs text-[#888] font-mono">Connecting to analysis engine...</span>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // PHASE 4: ANALYSIS — Show deep analysis (user reviews before acting)
+  // ══════════════════════════════════════════════════════════════
+  if (phase === 'analysis' && analysisData) {
+    return (
+      <div className="h-screen flex flex-col bg-[#0a0a0a]">
+        <div className="flex items-center gap-3 px-5 py-3 bg-[#1a1a1a] border-b border-[#333] flex-shrink-0">
+          <Cpu className="w-5 h-5 text-[#39ff14]" />
+          <span className="text-[#39ff14] font-bold text-sm tracking-wider">LAZARUS</span>
+          <div className="h-4 w-px bg-[#333] mx-2" />
+          <span className="text-xs text-[#888] truncate flex-1">{repoUrl}</span>
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] text-[#39ff14] tracking-wider">{repoFiles.length} FILES</span>
+            <span className="text-[10px] text-[#007acc]">ANALYZED</span>
+          </div>
+        </div>
+        <AnalysisPanel
+          analysis={analysisData}
+          onProceed={() => setPhase('planning')}
+        />
+      </div>
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // PHASE 5: PLANNING — User picks what to fix + writes instructions
+  // ══════════════════════════════════════════════════════════════
+  if (phase === 'planning' && analysisData) {
+    const drawbacks = analysisData.recommendations?.drawbacks || [];
+    const recs = analysisData.recommendations?.recommendations || [];
+
+    return (
+      <div className="h-screen flex flex-col bg-[#0a0a0a]">
+        <div className="flex items-center gap-3 px-5 py-3 bg-[#1a1a1a] border-b border-[#333] flex-shrink-0">
+          <Cpu className="w-5 h-5 text-[#39ff14]" />
+          <span className="text-[#39ff14] font-bold text-sm tracking-wider">LAZARUS</span>
+          <div className="h-4 w-px bg-[#333] mx-2" />
+          <span className="text-xs text-[#888] truncate flex-1">{repoUrl}</span>
+          <span className="text-[10px] text-[#e8ab53] tracking-wider">PLANNING</span>
+        </div>
+        <PlanningPanel
+          drawbacks={drawbacks}
+          recommendations={recs}
+          onStartBuild={startBuild}
+          onBack={() => setPhase('analysis')}
+        />
+      </div>
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // PHASE 6 & 7: BUILDING / RESULTS — VS Code Layout
+  // ══════════════════════════════════════════════════════════════
   return (
     <div className="h-screen flex flex-col bg-[#1e1e1e] text-[#cccccc] font-mono overflow-hidden">
 
       {/* ═══ TOP BAR ═══════════════════════════════════════════════ */}
       <div className="flex items-center gap-3 px-4 py-2 bg-[#323233] border-b border-[#3c3c3c] flex-shrink-0">
-        {/* Logo */}
-        <div className="flex items-center gap-2 mr-4">
+        <div className="flex items-center gap-2 mr-4 cursor-pointer" onClick={() => setPhase('input')}>
           <Cpu className="w-5 h-5 text-[#39ff14]" />
           <span className="text-[#39ff14] font-bold text-sm tracking-wider">LAZARUS</span>
         </div>
 
-        {/* Repo URL */}
-        <div className="flex-1 flex items-center gap-2 max-w-2xl">
+        <div className="flex-1 flex items-center gap-2 max-w-xl">
           <input
             type="text"
             value={repoUrl}
             onChange={e => setRepoUrl(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && scanRepo()}
-            placeholder="Enter GitHub repo URL..."
+            placeholder="GitHub repo URL..."
             className="flex-1 bg-[#3c3c3c] border border-[#555] rounded px-3 py-1.5 text-sm text-white placeholder-[#888] focus:outline-none focus:border-[#007acc] transition-colors"
           />
-          <button
-            onClick={scanRepo}
-            disabled={isScanning || !repoUrl}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded text-sm font-medium bg-[#0e639c] text-white hover:bg-[#1177bb] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-          >
-            {isScanning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}
-            {isScanning ? 'Scanning...' : 'Scan'}
-          </button>
+          {analysisData && (
+            <button
+              onClick={() => setPhase('analysis')}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded text-[10px] font-medium border border-[#007acc] text-[#007acc] hover:bg-[#007acc]/10 transition-colors"
+            >
+              <BarChart3 className="w-3 h-3" />
+              Analysis
+            </button>
+          )}
+          {analysisData && (
+            <button
+              onClick={() => setPhase('planning')}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded text-[10px] font-medium border border-[#e8ab53] text-[#e8ab53] hover:bg-[#e8ab53]/10 transition-colors"
+            >
+              <Zap className="w-3 h-3" />
+              Plan
+            </button>
+          )}
         </div>
 
-        {/* Instructions */}
-        <input
-          type="text"
-          value={instructions}
-          onChange={e => setInstructions(e.target.value)}
-          placeholder="Migration instructions..."
-          className="w-64 bg-[#3c3c3c] border border-[#555] rounded px-3 py-1.5 text-sm text-white placeholder-[#888] focus:outline-none focus:border-[#007acc] transition-colors"
-        />
-
-        {/* Action buttons */}
-        <button
-          onClick={initializeProtocol}
-          disabled={isLoading || !repoUrl}
-          className="flex items-center gap-1.5 px-4 py-1.5 rounded text-sm font-bold bg-[#39ff14] text-black hover:bg-[#2ecc0f] disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-        >
-          {isLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5 fill-current" />}
-          {isLoading ? 'Running...' : 'Run'}
-        </button>
+        {iterationCount > 0 && (
+          <span className="text-[9px] text-[#c678dd] tracking-wider border border-[#c678dd]/30 px-2 py-1 rounded">
+            Iteration {iterationCount}
+          </span>
+        )}
 
         <button
           onClick={deployCode}
@@ -266,21 +548,20 @@ export default function Home() {
         </button>
 
         {deployStatus?.url && (
-          <a href={deployStatus.url} target="_blank" className="text-[10px] text-[#007acc] underline">PR Link</a>
+          <a href={deployStatus.url} target="_blank" className="text-[10px] text-[#007acc] underline">PR</a>
         )}
 
-        {/* Status */}
         <div className="flex items-center gap-2 ml-auto text-[10px]">
-          {scanError && <span className="flex items-center gap-1 text-red-400"><AlertCircle className="w-3 h-3" />{scanError}</span>}
           {hasScanned && <span className="text-[#73c991]">{repoFiles.length} files</span>}
+          {isLoading && <Loader2 className="w-3 h-3 animate-spin text-[#39ff14]" />}
           <span className="text-[#39ff14]">ONLINE</span>
         </div>
       </div>
 
-      {/* ═══ MAIN AREA: FILE TREE + RIGHT PANEL ════════════════════ */}
+      {/* ═══ MAIN AREA ═══════════════════════════════════════════ */}
       <div className="flex flex-1 overflow-hidden">
 
-        {/* ── LEFT: FILE TREE (VS Code sidebar) ──────────────────── */}
+        {/* ── LEFT: FILE TREE ──────────────────────────────────── */}
         <div className="w-64 flex-shrink-0 border-r border-[#3c3c3c] flex flex-col bg-[#252526]">
           <FileTree
             files={allFileEntries}
@@ -289,7 +570,7 @@ export default function Home() {
           />
         </div>
 
-        {/* ── RIGHT: CODE / TERMINAL / PREVIEW ───────────────────── */}
+        {/* ── RIGHT: CODE / TERMINAL / PREVIEW ─────────────────── */}
         <div className="flex-1 flex flex-col overflow-hidden">
 
           {/* Tab bar */}
@@ -322,7 +603,6 @@ export default function Home() {
               </button>
             ))}
 
-            {/* File breadcrumb */}
             {rightTab === 'code' && selectedFile && (
               <span className="ml-3 text-[11px] text-[#888] truncate">{selectedFile}</span>
             )}
@@ -346,13 +626,11 @@ export default function Home() {
                     <>
                       <FolderTree className="w-12 h-12 mb-3 opacity-30" />
                       <p className="text-sm">Select a file from the explorer</p>
-                      <p className="text-[11px] mt-1 opacity-50">Modified files will show content after processing</p>
                     </>
                   ) : (
                     <>
                       <Cpu className="w-16 h-16 mb-4 opacity-20" />
-                      <p className="text-sm text-[#39ff14]/50">Enter a repo URL and click Scan</p>
-                      <p className="text-[11px] mt-1 opacity-40">Files will appear in the left panel</p>
+                      <p className="text-sm text-[#39ff14]/50">Waiting for build...</p>
                     </>
                   )}
                 </div>
@@ -364,7 +642,7 @@ export default function Home() {
               <div className="p-4 font-mono text-sm space-y-2">
                 {logs.length === 0 ? (
                   <div className="flex items-center justify-center h-full text-[#6b6b6b]">
-                    <span>No output yet. Click Run to start.</span>
+                    <span>{isLoading ? 'Processing...' : 'No output yet.'}</span>
                   </div>
                 ) : (
                   logs.map((log, i) => (
@@ -395,16 +673,34 @@ export default function Home() {
             )}
           </div>
 
+          {/* ── Review Panel (only shown when results phase) ────── */}
+          {phase === 'results' && !isLoading && (
+            <ReviewPanel
+              artifactCount={artifacts.length}
+              status={buildStatus}
+              retryCount={buildRetryCount}
+              errors={buildErrors}
+              onRefine={handleRefine}
+              onDeploy={deployCode}
+              isDeploying={isDeploying}
+              deployStatus={deployStatus}
+            />
+          )}
+
           {/* Bottom status bar */}
           <div className="flex items-center justify-between px-4 py-1 bg-[#007acc] text-white text-[11px] flex-shrink-0">
             <div className="flex items-center gap-3">
               <span>LAZARUS ENGINE</span>
               {hasScanned && <span>{repoFiles.length} files</span>}
               {artifacts.length > 0 && <span>{artifacts.length} modified</span>}
+              {iterationCount > 0 && <span>Iteration {iterationCount}</span>}
             </div>
             <div className="flex items-center gap-3">
-              {isLoading && <span className="flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> Processing...</span>}
-              <span>v9.0</span>
+              {isLoading && <span className="flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> Building...</span>}
+              <span>
+                {phase === 'building' ? 'BUILDING...' : phase === 'results' ? 'REVIEW & REFINE' : ''}
+              </span>
+              <span>v11.0</span>
             </div>
           </div>
         </div>
